@@ -12,9 +12,15 @@ from layer2_bus import apply_bus_risk
 
 load_dotenv()
 # 從 .env 讀取憑證
-TDX_CLIENT_ID = os.getenv("TDX_CLIENT_ID")
-TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if "GOOGLE_API_KEY" in st.secrets:
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    TDX_CLIENT_ID = st.secrets["TDX_CLIENT_ID"]
+    TDX_CLIENT_SECRET = st.secrets["TDX_CLIENT_SECRET"]
+else:
+    load_dotenv()
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    TDX_CLIENT_ID = os.getenv("TDX_CLIENT_ID")
+    TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
 
 # 1. 網頁標題
 st.set_page_config(page_title="Project Alley-Cat", layout="wide")
