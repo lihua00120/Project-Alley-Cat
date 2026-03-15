@@ -7,3 +7,4 @@ requests
 shapely
 geopandas
 scikit-learn
+python-dotenv
