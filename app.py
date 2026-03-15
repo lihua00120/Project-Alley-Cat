@@ -1,76 +1,130 @@
 import streamlit as st
 import osmnx as ox
+import os
 import networkx as nx
 import folium
 from streamlit_folium import st_folium
+import requests
+from dotenv import load_dotenv
 
-# 1. 網頁標題與設定
+# 引入layer1、layer2、layer3零件
+from layer2_bus import apply_bus_risk
+
+load_dotenv()
+# 從 .env 讀取憑證
+TDX_CLIENT_ID = os.getenv("TDX_CLIENT_ID")
+TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# 1. 網頁標題
 st.set_page_config(page_title="Project Alley-Cat", layout="wide")
-st.title("🐈 Project Alley-Cat：台南中西區微觀避險雷達")
-st.markdown("這是一個結合圖論與即時動態的物流避險系統，能自動避開大客車與擁擠巷弄。")
+st.title("🐈 Project Alley-Cat：避險雷達")
 
-# 2. 核心大腦：快取路網資料 (避免每次重整網頁都要重新下載)
+# 2. 載入地圖
 @st.cache_resource
-def load_graph():
+def load_base_graph():
     place_name = "中西區, 台南市, 台灣"
-    # 下載地圖
     G = ox.graph_from_place(place_name, network_type='drive')
-
-    # 加入路寬分級懲罰 (第一層物理阻力)
-    hierarchy_penalty = {'primary': 1, 'secondary': 1.2, 'tertiary': 2, 'residential': 5, 'service': 10, 'unclassified': 3}
     for u, v, k, data in G.edges(keys=True, data=True):
-        h_type = data.get('highway')
-        if isinstance(h_type, list): h_type = h_type[0]
-        data['dynamic_cost'] = data['length'] * hierarchy_penalty.get(h_type, 2)
-
+        data['dynamic_cost'] = data.get('length', 1)
     return G
+with st.spinner("🌍 正在載入基礎路網..."):
+    G_base = load_base_graph()
 
-# 載入地圖模型
-with st.spinner("正在載入中西區路網模型..."):
-    G = load_graph()
 
-# 3. 側邊欄控制面板
-st.sidebar.header("🕹️ 導航控制中心")
-st.sidebar.markdown("請設定起始點與終點：")
-# 為了測試方便，我們先預設好剛剛成功繞道的座標
-start_lat = st.sidebar.number_input("起點緯度", value=23.0001, format="%.4f")
-start_lon = st.sidebar.number_input("起點經度", value=120.1969, format="%.4f")
-end_lat = st.sidebar.number_input("終點緯度", value=22.9960, format="%.4f")
-end_lon = st.sidebar.number_input("終點經度", value=120.1950, format="%.4f")
+def get_precise_location(address, api_key):
+    """使用 Google Geocoding API 將完整地址轉換為精確經緯度"""
+    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={address}&key={api_key}&language=zh-TW"
+    response = requests.get(url).json()
 
-activate_risk = st.sidebar.checkbox("🚨 模擬突發事件：神農街有公車停靠", value=True)
+    if response['status'] == 'OK':
+        lat = response['results'][0]['geometry']['location']['lat']
+        lon = response['results'][0]['geometry']['location']['lng']
+        return lat, lon
+    else:
+        raise ValueError(f"Google 找不到這個地址，請確認門牌是否正確：{address}")
 
-# 4. 運算路徑
-orig = ox.distance.nearest_nodes(G, X=start_lon, Y=start_lat)
-dest = ox.distance.nearest_nodes(G, X=end_lon, Y=end_lat)
+# 3. 側邊欄介面
+st.sidebar.header("🕹️ 導航控制")
+start_loc = st.sidebar.text_input("📍 起點", value="臺南市中西區樹林街二段33號")
+end_loc = st.sidebar.text_input("🏁 終點", value="臺南市中西區神農街135號") 
+activate_bus = st.sidebar.checkbox("🚌 啟用公車動態避險", value=True)
 
-# 如果勾選了突發事件，就把神農街附近的路口加上巨大阻力
-risk_node = ox.distance.nearest_nodes(G, X=120.1970, Y=22.9985) # 神農街概略位置
-if activate_risk:
-    for u, v, k, data in G.edges(keys=True, data=True):
-        if u == risk_node or v == risk_node:
-            data['dynamic_cost'] += 10000
+# 4. 執行按鈕
+if st.sidebar.button("開始導航 🚀", type="primary", use_container_width=True):
+    with st.spinner("正在計算路徑..."):
+        try:
+            G_run = G_base.copy()
 
-# 計算兩條路線
-route_trad = nx.shortest_path(G, orig, dest, weight='length')
-route_safe = nx.shortest_path(G, orig, dest, weight='dynamic_cost')
+            # 從 .env 讀到的 ID 和 Secret
+            if activate_bus:
+                G_run = apply_bus_risk(G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET)
 
-# 5. 繪製互動式地圖
-m = folium.Map(location=[22.998, 120.196], zoom_start=15, tiles="CartoDB positron")
+            # 網頁輸入完整地址！
+            start_lat, start_lon = get_precise_location(start_loc, GOOGLE_API_KEY)
+            end_lat, end_lon = get_precise_location(end_loc, GOOGLE_API_KEY)
 
-# 將傳統路徑 (紅色) 畫上地圖
-trad_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route_trad]
-folium.PolyLine(trad_coords, color="red", weight=4, opacity=0.6, tooltip="傳統最短路徑").add_to(m)
+            # 尋找最近節點
+            orig = ox.distance.nearest_nodes(G_run, X=start_lon, Y=start_lat)
+            dest = ox.distance.nearest_nodes(G_run, X=end_lon, Y=end_lat)
 
-# 將避險路徑 (綠色) 畫上地圖
-safe_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route_safe]
-folium.PolyLine(safe_coords, color="lime", weight=6, opacity=0.9, tooltip="Alley-Cat 避險路徑").add_to(m)
+            truck_start_lat = G_run.nodes[orig]['y']
+            truck_start_lon = G_run.nodes[orig]['x']
+            truck_end_lat = G_run.nodes[dest]['y']
+            truck_end_lon = G_run.nodes[dest]['x']
 
-# 標記起終點和風險點
-folium.Marker([start_lat, start_lon], popup="起點", icon=folium.Icon(color="blue")).add_to(m)
-folium.Marker([end_lat, end_lon], popup="終點", icon=folium.Icon(color="green")).add_to(m)
-if activate_risk:
-    folium.CircleMarker([G.nodes[risk_node]['y'], G.nodes[risk_node]['x']], radius=10, color="orange", fill=True, fill_color="orange", popup="⚠️ 風險區").add_to(m)
+            # 計算路徑
+            route = nx.shortest_path(G_run, orig, dest, weight='dynamic_cost')
 
-# 在網頁上顯示地圖
-st_folium(m, width=800, height=600)
+            # 5. 畫地圖
+            m = folium.Map(
+                    location=[start_lat, start_lon], 
+                    zoom_start=16, 
+                    tiles='http://mt0.google.com/vt/lyrs=m&hl=zh-TW&x={x}&y={y}&z={z}',
+                    attr='Google Maps'
+                )
+
+            route_coords = [[G_run.nodes[n]['y'], G_run.nodes[n]['x']] for n in route]
+
+            full_route_coords = [[start_lat, start_lon]] + route_coords + [[end_lat, end_lon]]
+            folium.PolyLine(route_coords, color="#00E676", weight=6, opacity=0.8).add_to(m)
+
+            # 標示【客戶實際地址】
+            folium.Marker(
+                [end_lat, end_lon], 
+                popup=f"📦 送貨目的地: {end_loc}", 
+                icon=folium.Icon(color='blue', icon='home', prefix='fa')
+            ).add_to(m)
+
+            # 標示【貨車停靠點】(演算法算出來的最近大馬路)
+            folium.Marker(
+                [truck_end_lat, truck_end_lon], 
+                popup="🚚 貨車最佳停靠/卸貨點", 
+                icon=folium.Icon(color='red', icon='truck', prefix='fa')
+            ).add_to(m)
+
+            # 用一條淺灰色細線連接停車點與客戶家，代表「手推車步行距離」
+            folium.PolyLine(
+                [[truck_end_lat, truck_end_lon], [end_lat, end_lon]], 
+                color="gray", weight=2, dash_array='5, 5', tooltip="司機推車步行路線"
+            ).add_to(m)
+
+            # 起點的貨車位置
+            folium.Marker(
+                [truck_start_lat, truck_start_lon], 
+                popup=f"出發點 (近 {start_loc})", 
+                icon=folium.Icon(color='green', icon='truck', prefix='fa')
+            ).add_to(m)
+
+            all_coords = route_coords + [[end_lat, end_lon]]
+            m.fit_bounds(route_coords)
+
+            import streamlit.components.v1 as components
+            map_html = m._repr_html_()
+
+            # 直接用 Streamlit 的 HTML 元件插入地圖
+            components.html(map_html, height=600)
+
+        except Exception as e:
+            # 這裡會幫你印出具體的錯誤原因
+            st.error(f"錯誤：{e}")
