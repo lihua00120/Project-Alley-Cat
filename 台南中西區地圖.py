@@ -3,8 +3,8 @@ import osmnx as ox
 import folium
 import math
 
-# ===== API Key =====
-GOOGLE_API_KEY = "AIzaSyDDn9Sq5cTUP_5mP5Ih2Zjbb2f6wp-kzbU"
+
+
 
 # 讀取中西區 
 shp_path = "/Users/bosichen/統一/村(里)界(TWD97經緯度)1150224/VILLAGE_NLSC_1150306.shp"
@@ -132,7 +132,7 @@ for category in ['normal', 'narrow', 'oneway']:
         else:
             heading = 0
 
-        gsv_img_url = f"https://maps.googleapis.com/maps/api/streetview?size=400x250&location={lat},{lng}&heading={heading}&fov=90&pitch=0&key={GOOGLE_API_KEY}"
+        gsv_img_url = f"https://maps.googleapis.com/maps/api/streetview?size=400x250&location={lat},{lng}&heading={heading}&fov=90&pitch=0&key={GOOGLE_API_KEY_BYBC }"
         gsv_link_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}&heading={heading}"
 
         popup_html = f"""
