@@ -1,42 +1,56 @@
 import requests
-import pandas as pd
+import osmnx as ox
+from shapely.geometry import Point
 
-def get_bus_data_v3(route_name, client_id, client_secret):
-    # 1. 取得 Token (保持你原本的 auth 邏輯)
-    token = get_tdx_token(client_id, client_secret)
-    if not token:
-        return pd.DataFrame()
+def apply_bus_risk(G, client_id, client_secret):
+    """
+    ✨ 關鍵修正：這裡現在接收 G, client_id, client_secret 共三個參數
+    """
+    print("🚌 [Layer 2] 正在自動換發 Token 並掃描風險...")
 
-    # 2. 設定 v3 URL
-    # 注意：{route_name} 直接帶入路線名稱，如 "2" 或 "6"
-    url = f"https://tdx.transportdata.tw/api/basic/v3/Bus/RealTimeByFrequency/City/Tainan/{route_name}"
-    headers = {"Authorization": f"Bearer {token}"}
+    # 1. 自動換 Token
+    auth_url = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
+    auth_data = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret
+    }
 
-    response = requests.get(url, headers=headers)
+    try:
+        auth_res = requests.post(auth_url, data=auth_data)
+        auth_res.raise_for_status()
+        token = auth_res.json().get('access_token')
+    except Exception as e:
+        print(f"❌ Token 取得失敗: {e}")
+        return G
 
-    if response.status_code == 200:
-        res_data = response.json()
+    # 2. 抓取站牌資料
+    headers = {'authorization': f'Bearer {token}'}
+    station_url = "https://tdx.transportdata.tw/api/basic/v2/Bus/Station/City/Tainan?%24format=JSON"
 
-        # v3 的結構：主要資料在 'Buses' 陣列中
-        buses = res_data.get('Buses', [])
+    try:
+        res = requests.get(station_url, headers=headers)
+        data = res.json()
 
-        extracted_data = []
-        for bus in buses:
-            pos = bus.get('BusPosition', {})
-            extracted_data.append({
-                'PlateNumb': bus.get('PlateNumb'),
-                'RouteName': bus.get('RouteName', {}).get('Zh_tw'),
-                'Latitude': pos.get('PositionLat'),
-                'Longitude': pos.get('PositionLon'),
-                'BusStatus': bus.get('BusStatus'),
-                'GPSTime': bus.get('GPSTime')
-            })
+        # 取得邊界過濾
+        district_gdf = ox.geocode_to_gdf("中西區, 台南市, 台灣")
+        district_boundary = district_gdf.unary_union.buffer(0.005)
 
-        return pd.DataFrame(extracted_data)
-    else:
-        print(f"Error {response.status_code}: {response.text}")
-        return pd.DataFrame()
+        stop_nodes = []
+        for station in data:
+            pos = station.get('StationPosition', {})
+            lat, lon = pos.get('PositionLat'), pos.get('PositionLon')
+            if lat and lon and Point(lon, lat).within(district_boundary):
+                stop_nodes.append(ox.distance.nearest_nodes(G, X=lon, Y=lat))
 
-# 使用範例
-# df_bus = get_bus_data_v3("6", YOUR_ID, YOUR_SECRET)
-# print(df_bus.head())
+        # 3. 注入風險
+        unique_stops = set(stop_nodes)
+        for u, v, k, d in G.edges(keys=True, data=True):
+            if u in unique_stops or v in unique_stops:
+                d['dynamic_cost'] += 10000
+        print(f"🚨 [Layer 2] 成功！已處理 {len(unique_stops)} 個風險點")
+
+    except Exception as e:
+        print(f"❌ 資料抓取失敗: {e}")
+
+    return G
