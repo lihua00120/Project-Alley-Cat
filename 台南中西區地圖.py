@@ -6,6 +6,7 @@ import math
 
 
 
+
 # 讀取中西區 
 shp_path = "/Users/bosichen/統一/村(里)界(TWD97經緯度)1150224/VILLAGE_NLSC_1150306.shp"
 gdf = gpd.read_file(shp_path)
@@ -23,6 +24,37 @@ print("正在判斷死巷...")
 G_drive = ox.graph_from_polygon(boundary, network_type='drive')
 dead_end_nodes = set([node for node, degree in G_drive.degree() if degree == 1])
 print(f"找到 {len(dead_end_nodes)} 個死巷節點")
+
+# ==========================================
+# 🚀 新增：計算動態權重 (Layer 1) 並存檔給 App 使用
+print("正在將避險權重 (dynamic_cost) 寫入導航路網中...")
+narrow_types = ['service', 'living_street', 'alley']
+
+for u, v, k, data in G_drive.edges(data=True, keys=True):
+    # 預設成本 = 實際道路長度
+    cost = data.get('length', 10)
+    
+    # 處理道路類型 (有些 highway 標籤是 list)
+    highway = data.get('highway', '')
+    if isinstance(highway, list):
+        highway = highway[0]
+        
+    # 規則 A：如果是窄巷，成本變 2 倍
+    if highway in narrow_types:
+        cost *= 2
+        
+    # 規則 B：如果是死巷，成本變 5 倍
+    if u in dead_end_nodes or v in dead_end_nodes:
+        cost *= 5
+        
+    # 將計算好的代價寫入地圖標籤中
+    data['dynamic_cost'] = cost
+
+# 存檔成 graphml，這是 app.py 導航時要吃的檔案！
+graphml_path = "tainan_base_map.graphml"
+ox.save_graphml(G_drive, filepath=graphml_path)
+print(f"✅ 導航專用路網已存檔至：{graphml_path}")
+# ==========================================
 
 nodes_all, edges_all_reset = ox.graph_to_gdfs(G_all)
 edges_all_reset = edges_all_reset.reset_index()
@@ -132,7 +164,7 @@ for category in ['normal', 'narrow', 'oneway']:
         else:
             heading = 0
 
-        gsv_img_url = f"https://maps.googleapis.com/maps/api/streetview?size=400x250&location={lat},{lng}&heading={heading}&fov=90&pitch=0&key={GOOGLE_API_KEY_BYBC }"
+        gsv_img_url = f"https://maps.googleapis.com/maps/api/streetview?size=400x250&location={lat},{lng}&heading={heading}&fov=90&pitch=0&key={GOOGLE_API_KEY_BYBC}"
         gsv_link_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lng}&heading={heading}"
 
         popup_html = f"""
