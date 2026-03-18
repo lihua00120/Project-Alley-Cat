@@ -59,7 +59,7 @@ def get_active_events(selected_date: date, df: pd.DataFrame) -> pd.DataFrame:
 def load_base_graph():
     G = ox.graph_from_place("中西區, 台南市, 台灣", network_type='drive')
     dead_end_nodes = {node for node, deg in G.degree() if deg == 1}
-    narrow_types   = {'service', 'living_street', 'alley', 'track', 'path'}
+    narrow_types   = {'living_street', 'alley', 'track', 'path'}
 
     for u, v, k, data in G.edges(keys=True, data=True):
         length  = data.get('length', 1.0)
