@@ -69,8 +69,6 @@ def load_base_graph():
             highway = highway[0]
         if highway in narrow_types:
             cost *= 70
-        if data.get('oneway', False):
-            cost *= 50
         if u in dead_end_nodes or v in dead_end_nodes:
             cost *= 100
         data['dynamic_cost'] = cost
