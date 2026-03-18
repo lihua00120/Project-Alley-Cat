@@ -8,19 +8,13 @@ import requests
 from dotenv import load_dotenv
 
 # 引入layer1、layer2、layer3零件
-from layer2_bus import apply_bus_risk
+from layer2_bus import get_bus_data_v3
 
 load_dotenv()
 # 從 .env 讀取憑證
-if "GOOGLE_API_KEY" in st.secrets:
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-    TDX_CLIENT_ID = st.secrets["TDX_CLIENT_ID"]
-    TDX_CLIENT_SECRET = st.secrets["TDX_CLIENT_SECRET"]
-else:
-    load_dotenv()
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-    TDX_CLIENT_ID = os.getenv("TDX_CLIENT_ID")
-    TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
+TDX_CLIENT_ID = os.getenv("TDX_CLIENT_ID")
+TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # 1. 網頁標題
 st.set_page_config(page_title="Project Alley-Cat", layout="wide")
@@ -30,11 +24,46 @@ st.title("🐈 Project Alley-Cat：避險雷達")
 @st.cache_resource
 def load_base_graph():
     place_name = "中西區, 台南市, 台灣"
+
+    # 抓取可行駛路網 (drive)
+    # ox.graph_from_place 會自動抓取單行道 (oneway) 等屬性
     G = ox.graph_from_place(place_name, network_type='drive')
+
+    # 判斷死巷節點 (節點連接數為 1)
+    dead_end_nodes = set([node for node, degree in G.degree() if degree == 1])
+
+    # 定義窄巷類型
+    narrow_types = ['service', 'living_street', 'alley']
+
     for u, v, k, data in G.edges(keys=True, data=True):
-        data['dynamic_cost'] = data.get('length', 1)
+        # 取得基本長度 (公尺)
+        length = data.get('length', 1.0)
+        cost = length
+
+        # 1. 處理道路類型標籤 (有些標籤是 list)
+        highway = data.get('highway', '')
+        if isinstance(highway, list):
+            highway = highway[0]
+
+        # 2. 規則 A：如果是窄巷，成本變 3 倍 (讓駕駛傾向走大路)
+        if highway in narrow_types:
+            cost *= 70
+
+        # 3. 規則 B：如果是單行道 (oneway)
+        # 雖然 OSM 導航本來就不會逆向，但通常單行道較窄，我們加重 1.5 倍避開
+        if data.get('oneway', False):
+            cost *= 50
+
+        # 4. 規則 C：如果是死巷，成本變 10 倍 (極度避開)
+        if u in dead_end_nodes or v in dead_end_nodes:
+            cost *= 100
+
+        # 將最終計算的避險權重存入 dynamic_cost
+        data['dynamic_cost'] = cost
+
     return G
-with st.spinner("🌍 正在載入基礎路網..."):
+
+with st.spinner("🌍 正在載入並計算避險路網權重..."):
     G_base = load_base_graph()
 
 
