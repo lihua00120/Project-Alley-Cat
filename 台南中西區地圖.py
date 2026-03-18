@@ -26,16 +26,13 @@ dead_end_nodes = set([node for node, degree in G_drive.degree() if degree == 1])
 print(f"找到 {len(dead_end_nodes)} 個死巷節點")
 
 # ==========================================
-# 🚀 新增：計算動態權重 (Layer 1) 並存檔給 App 使用
-print("正在將避險權重 (dynamic_cost) 寫入導航路網中...")
+# 計算動態權重 (Layer 1) 
 narrow_types = ['service', 'living_street', 'alley']
 
 for u, v, k, data in G_drive.edges(data=True, keys=True):
-    # 預設成本 = 實際道路長度
     cost = data.get('length', 10)
-    
-    # 處理道路類型 (有些 highway 標籤是 list)
     highway = data.get('highway', '')
+
     if isinstance(highway, list):
         highway = highway[0]
         
@@ -51,9 +48,7 @@ for u, v, k, data in G_drive.edges(data=True, keys=True):
     data['dynamic_cost'] = cost
 
 # 存檔成 graphml，這是 app.py 導航時要吃的檔案！
-graphml_path = "tainan_base_map.graphml"
-ox.save_graphml(G_drive, filepath=graphml_path)
-print(f"✅ 導航專用路網已存檔至：{graphml_path}")
+ox.save_graphml(G_drive, filepath="tainan_base_map.graphml")
 # ==========================================
 
 nodes_all, edges_all_reset = ox.graph_to_gdfs(G_all)
