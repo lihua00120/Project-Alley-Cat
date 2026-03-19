@@ -13,6 +13,7 @@ import itertools
 from layer2_bus      import apply_bus_risk
 from layer4_accident import apply_accident_risk
 from layer5_tourist  import apply_tourist_risk
+from layer6_garbage  import apply_garbage_risk
 from weights         import STATIC, LAYER3
 
 load_dotenv()
@@ -236,6 +237,7 @@ activate_bus      = st.sidebar.checkbox("🚌 公車動態避險",   value=True)
 activate_events   = st.sidebar.checkbox("🎪 廟會 / 活動避險", value=True)
 activate_accident = st.sidebar.checkbox("🚨 即時車禍避險",   value=True)
 activate_tourist  = st.sidebar.checkbox("📸 觀光熱區避險",   value=True)
+activate_garbage  = st.sidebar.checkbox("🗑️ 垃圾車清運避險", value=True)
 
 st.sidebar.markdown("---")
 
@@ -288,6 +290,13 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                 )
                 all_markers.extend(tour_markers)
 
+            # Layer 6：垃圾車清運避險
+            if activate_garbage:
+                G_run, garbage_markers, garbage_active = apply_garbage_risk(G_run)
+                all_markers.extend(garbage_markers)
+                if garbage_active:
+                    st.warning(f"🗑️ Layer 6：垃圾車清運時段，{len(garbage_markers)} 個路段已套用避險")
+
             # 地理編碼
             s_lat, s_lon = get_location(start_loc)
             orig = ox.distance.nearest_nodes(G_run, X=s_lon, Y=s_lat)
@@ -310,16 +319,18 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
 
             # ── 統計指標 ───────────────────────────────────────────────────────
             total_len  = sum(G_run[u][v][0].get('length', 0) for s in segments for u, v in zip(s[:-1], s[1:]))
-            acc_count  = sum(1 for m in all_markers if m.get("layer") == "accident")
-            ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
-            tour_count = sum(1 for m in all_markers if m.get("layer") == "tourist")
+            acc_count      = sum(1 for m in all_markers if m.get("layer") == "accident")
+            ev_count       = sum(1 for m in all_markers if m.get("layer") == "event")
+            tour_count     = sum(1 for m in all_markers if m.get("layer") == "tourist")
+            garbage_count  = sum(1 for m in all_markers if m.get("layer") == "garbage")
 
-            c1, c2, c3, c4, c5 = st.columns(5)
+            c1, c2, c3, c4, c5, c6 = st.columns(6)
             c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
             c2.metric("📦 配送站數",   f"{len(ordered_nodes)}")
             c3.metric("🚨 即時事故",   f"{acc_count} 筆")
             c4.metric("🎪 道路管制",   f"{ev_count} 筆")
             c5.metric("📸 觀光熱區",   f"{tour_count} 個")
+            c6.metric("🗑️ 垃圾清運",   f"{garbage_count} 路段")
 
             # Layer 5 摘要（給司機看，有數據來源說明）
             if activate_tourist:
@@ -443,6 +454,19 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                         ),
                         tooltip=f"📸 {mk['name']}（{penalty_label}）",
                         icon=folium.Icon(color='purple', icon='camera', prefix='fa')
+                    ).add_to(m)
+
+                elif layer == "garbage":
+                    folium.Marker(
+                        location=[mk["lat"], mk["lon"]],
+                        popup=(
+                            f"🗑️ <b>垃圾車清運中</b><br>"
+                            f"區域：{mk.get('area', '')}<br>"
+                            f"班次：{mk.get('time_label', '')}<br>"
+                            f"單車道路段已套用避險懲罰"
+                        ),
+                        tooltip=f"🗑️ 垃圾車清運（{mk.get('area', '')}）",
+                        icon=folium.Icon(color='darkgreen', icon='trash', prefix='fa')
                     ).add_to(m)
 
             if all_coords:
