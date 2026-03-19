@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 import itertools
 
 from layer2_bus      import apply_bus_risk
-from layer4_accident import apply_accident_risk
+from layer4_accident import apply_traffic_risk
 from layer5_tourist  import apply_tourist_risk
 from layer6_garbage  import apply_garbage_risk
 from weights         import STATIC, LAYER3
@@ -278,7 +278,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
             # Layer 4：即時車禍
             if activate_accident:
                 if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
-                    G_run, acc_markers = apply_accident_risk(G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET)
+                    G_run, acc_markers = apply_traffic_risk(G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET)
                     all_markers.extend(acc_markers)
                 else:
                     st.warning("⚠️ 未設定 TDX 金鑰，跳過車禍避險")
