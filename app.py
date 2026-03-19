@@ -13,7 +13,6 @@ import itertools
 from layer2_bus      import apply_bus_risk
 from layer4_accident import apply_traffic_risk
 from layer5_tourist  import apply_tourist_risk
-from layer6_garbage  import apply_garbage_risk
 from weights         import STATIC, LAYER3
 
 load_dotenv()
@@ -26,12 +25,11 @@ GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY")
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Project Alley-Cat", layout="wide")
 
-# ── 右上角：日期選擇 + 標題（用欄位排版）────────────────────────────────────
 col_title, col_date = st.columns([3, 1])
 with col_title:
     st.title("🐈 Project Alley-Cat：避險雷達")
 with col_date:
-    st.write("")   # 推到同高
+    st.write("")
     selected_date = st.date_input(
         "📅 配送日期",
         value=date.today(),
@@ -153,12 +151,12 @@ def apply_event_risk(G, sel_date: date):
 def greedy_route(G, orig, dest_nodes):
     remaining, current, order, segments = list(dest_nodes), orig, [], []
     while remaining:
-        best_node, best_cost, best_path = None, float('inf'), []
+        best_node, best_dist, best_path = None, float('inf'), []
         for cand in remaining:
             try:
-                c = nx.shortest_path_length(G, current, cand, weight='dynamic_cost')
-                if c < best_cost:
-                    best_cost = c
+                dist = nx.shortest_path_length(G, current, cand, weight='length')
+                if dist < best_dist:
+                    best_dist = dist
                     best_node = cand
                     best_path = nx.shortest_path(G, current, cand, weight='dynamic_cost')
             except nx.NetworkXNoPath:
@@ -173,11 +171,10 @@ def greedy_route(G, orig, dest_nodes):
     return order, segments
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 側邊欄 UI（精簡版，移除開發者資訊）
+# 側邊欄 UI
 # ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("🕹️ 導航控制")
 
-# ── 當天管制事件提示（只顯示數量，不顯示詳細清單）──────────────────────────
 active_preview = event_df[
     event_df["開始時間"].notna() &
     event_df["結束時間"].notna() &
@@ -190,7 +187,6 @@ if not active_preview.empty:
 else:
     st.sidebar.success("✅ 當天無道路管制事件")
 
-# 展開才看到詳細（給司機查用）
 with st.sidebar.expander("📋 查看當天管制詳情"):
     if active_preview.empty:
         st.write("無管制事件")
@@ -207,10 +203,8 @@ with st.sidebar.expander("📋 查看當天管制詳情"):
 
 st.sidebar.markdown("---")
 
-# ── 起點 ──────────────────────────────────────────────────────────────────────
 start_loc = st.sidebar.text_input("📍 起點", value="臺南市中西區樹林街二段33號")
 
-# ── 多目的地 ───────────────────────────────────────────────────────────────────
 st.sidebar.markdown("**🏁 目的地清單**（可新增多個）")
 if "destinations" not in st.session_state:
     st.session_state.destinations = ["臺南市中西區神農街135號"]
@@ -231,13 +225,11 @@ if st.sidebar.button("➕ 新增目的地", use_container_width=True):
 
 st.sidebar.markdown("---")
 
-# ── 避險層開關（只保留對司機有意義的開關）──────────────────────────────────
 st.sidebar.markdown("**🛡️ 避險選項**")
 activate_bus      = st.sidebar.checkbox("🚌 公車動態避險",   value=True)
 activate_events   = st.sidebar.checkbox("🎪 廟會 / 活動避險", value=True)
 activate_accident = st.sidebar.checkbox("🚨 即時車禍避險",   value=True)
 activate_tourist  = st.sidebar.checkbox("📸 觀光熱區避險",   value=True)
-activate_garbage  = st.sidebar.checkbox("🗑️ 垃圾車清運避險", value=True)
 
 st.sidebar.markdown("---")
 
@@ -283,19 +275,12 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                 else:
                     st.warning("⚠️ 未設定 TDX 金鑰，跳過車禍避險")
 
-            # Layer 5：觀光熱區（TDX 官方景點 + 時段模型）
+            # Layer 5：觀光熱區
             if activate_tourist:
                 G_run, tour_markers, tour_summary = apply_tourist_risk(
                     G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET
                 )
                 all_markers.extend(tour_markers)
-
-            # Layer 6：垃圾車清運避險
-            if activate_garbage:
-                G_run, garbage_markers, garbage_active, garbage_label = apply_garbage_risk(G_run)
-                all_markers.extend(garbage_markers)
-                if garbage_active:
-                    st.warning(f"🗑️ Layer 6：{garbage_label}清運時段（含誤點緩衝），{len(garbage_markers)} 個路段已套用避險")
 
             # 地理編碼
             s_lat, s_lon = get_location(start_loc)
@@ -319,20 +304,17 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
 
             # ── 統計指標 ───────────────────────────────────────────────────────
             total_len  = sum(G_run[u][v][0].get('length', 0) for s in segments for u, v in zip(s[:-1], s[1:]))
-            acc_count      = sum(1 for m in all_markers if m.get("layer") == "accident")
-            ev_count       = sum(1 for m in all_markers if m.get("layer") == "event")
-            tour_count     = sum(1 for m in all_markers if m.get("layer") == "tourist")
-            garbage_count  = sum(1 for m in all_markers if m.get("layer") == "garbage")
+            acc_count  = sum(1 for m in all_markers if m.get("layer") == "accident")
+            ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
+            tour_count = sum(1 for m in all_markers if m.get("layer") == "tourist")
 
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
             c2.metric("📦 配送站數",   f"{len(ordered_nodes)}")
             c3.metric("🚨 即時事故",   f"{acc_count} 筆")
             c4.metric("🎪 道路管制",   f"{ev_count} 筆")
             c5.metric("📸 觀光熱區",   f"{tour_count} 個")
-            c6.metric("🗑️ 垃圾清運",   f"{garbage_count} 路段")
 
-            # Layer 5 摘要（給司機看，有數據來源說明）
             if activate_tourist:
                 st.info(f"📸 觀光熱區資訊：{tour_summary}（資料來源：TDX 交通部觀光署）")
 
@@ -425,7 +407,6 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                     ).add_to(m)
 
                 elif layer == "accident":
-                    # 依事件類型決定顏色
                     acc_color = {1: 'red', 2: 'gray', 3: 'orange', 4: 'darkred', 5: 'orange'
                                  }.get(mk.get("type_code", 5), 'orange')
                     folium.Marker(
@@ -454,19 +435,6 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                         ),
                         tooltip=f"📸 {mk['name']}（{penalty_label}）",
                         icon=folium.Icon(color='purple', icon='camera', prefix='fa')
-                    ).add_to(m)
-
-                elif layer == "garbage":
-                    folium.Marker(
-                        location=[mk["lat"], mk["lon"]],
-                        popup=(
-                            f"🗑️ <b>垃圾車清運中</b><br>"
-                            f"區域：{mk.get('area', '')}<br>"
-                            f"班次：{mk.get('time_label', '')}<br>"
-                            f"單車道路段已套用避險懲罰"
-                        ),
-                        tooltip=f"🗑️ 垃圾車清運（{mk.get('area', '')}）",
-                        icon=folium.Icon(color='darkgreen', icon='trash', prefix='fa')
                     ).add_to(m)
 
             if all_coords:
