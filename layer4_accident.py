@@ -1,135 +1,139 @@
-"""
-Layer 4：即時交通事件避險
-────────────────────────────────────────────────
-資料來源：TDX /api/basic/v2/Road/Traffic/RealTimeEvent/City/Tainan
-涵蓋事件類型：
-    EventType 1 → 車禍事故   懲罰 ×500
-    EventType 2 → 道路施工   懲罰 ×80
-    EventType 3 → 特殊事件   懲罰 ×200（封路、活動）
-    EventType 4 → 天災       懲罰 ×500（積水、崩塌）
-    EventType 5 → 其他異常   懲罰 ×100
-"""
-
 import requests
 import osmnx as ox
-import streamlit as st
-from weights import LAYER4
-
-# 中西區 bounding box
-LAT_MIN, LAT_MAX = 22.985, 23.005
-LON_MIN, LON_MAX = 120.185, 120.215
+from shapely.geometry import Point
 
 
-
-def _get_token(client_id, client_secret):
-    auth_url = (
-        "https://tdx.transportdata.tw/auth/realms/TDXConnect"
-        "/protocol/openid-connect/token"
-    )
-    res = requests.post(auth_url, data={
-        'grant_type':    'client_credentials',
-        'client_id':     client_id,
-        'client_secret': client_secret,
-    }, timeout=10)
-    res.raise_for_status()
-    return res.json().get('access_token')
-
-
-def apply_accident_risk(G, client_id, client_secret):
+def apply_traffic_risk(G, client_id, client_secret):
     """
-    Layer 4：從 TDX RealTimeEvent API 抓取台南市即時交通事件，
-    依事件類型套用不同懲罰倍率。
-
-    參數：
-        G             - 已含 dynamic_cost 的路網圖
-        client_id     - TDX Client ID
-        client_secret - TDX Client Secret
-
-    回傳：
-        G        - 更新後的路網圖
-        markers  - 地圖標記清單（供 app.py 繪圖用）
+    Layer 4：即時道路事件避險
+    - 來源1：CongestionLevel  路況壅塞水準
+    - 來源2：Live/News        最新道路消息（車禍、施工、封路）
     """
-    print("🚨 [Layer 4] 正在抓取即時交通事件...")
-    markers = []
+    print("🚦 [Layer 4] 正在取得即時道路事件資料...")
 
-    # ── Step 1：取得 Token ────────────────────────────────────────────────────
+    # 1. 自動換 Token
+    auth_url = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
+    auth_data = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret
+    }
     try:
-        token = _get_token(client_id, client_secret)
+        auth_res = requests.post(auth_url, data=auth_data, timeout=10)
+        auth_res.raise_for_status()
+        token = auth_res.json().get('access_token')
     except Exception as e:
-        st.warning(f"⚠️ [Layer 4] Token 取得失敗：{e}")
-        return G, markers
+        print(f"❌ [Layer 4] Token 取得失敗：{e}")
+        return G
 
     headers = {'authorization': f'Bearer {token}'}
 
-    # ── Step 2：抓取即時交通事件（basic 版本，一般帳號可用）─────────────────
-    url = (
-        "https://tdx.transportdata.tw/api/basic/v2"
-        "/Road/Traffic/RealTimeEvent/City/Tainan"
-        "?$format=JSON"
-    )
+    # 取得台南中西區邊界，用來過濾資料點
     try:
-        res  = requests.get(url, headers=headers, timeout=15)
-        res.raise_for_status()
-        raw  = res.json()
+        district_gdf = ox.geocode_to_gdf("中西區, 台南市, 台灣")
+        district_boundary = district_gdf.unary_union.buffer(0.005)
+    except Exception as e:
+        print(f"⚠️ [Layer 4] 邊界取得失敗，略過地理過濾：{e}")
+        district_boundary = None
 
-        # TDX RealTimeEvent 有時回傳 {"RealTimeEventList": [...]}
-        # 有時直接回傳 list，需要兩種都處理
-        if isinstance(raw, list):
-            data = raw
-        elif isinstance(raw, dict):
-            # 嘗試常見的外層 key
-            data = (raw.get('RealTimeEventList')
-                    or raw.get('EventList')
-                    or raw.get('data')
-                    or [])
-        else:
-            data = []
+    risk_count = 0
+
+    # -------------------------------------------------------
+    # 來源1：壅塞水準
+    # CongestionLevel: 1=暢通, 2=稍慢, 3=壅塞, 4=嚴重壅塞
+    # -------------------------------------------------------
+    try:
+        url_congestion = (
+            "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/"
+            "CongestionLevel/City/Tainan?$format=JSON"
+        )
+        res = requests.get(url_congestion, headers=headers, timeout=10)
+        res.raise_for_status()
+        congestion_data = res.json()
+
+        for item in congestion_data:
+            level = item.get('CongestionLevel', 1)
+            if level < 2:
+                continue  # 暢通，不加成本
+
+            # 路段起終點座標取中點
+            start = item.get('StartPosition', {})
+            end = item.get('EndPosition', {})
+            lat_s, lon_s = start.get('PositionLat'), start.get('PositionLon')
+            lat_e, lon_e = end.get('PositionLat'), end.get('PositionLon')
+
+            if not all([lat_s, lon_s, lat_e, lon_e]):
+                continue
+
+            mid_lat = (lat_s + lat_e) / 2
+            mid_lon = (lon_s + lon_e) / 2
+
+            if district_boundary and not Point(mid_lon, mid_lat).within(district_boundary):
+                continue
+
+            # 壅塞等級對應成本
+            cost_map = {2: 3000, 3: 8000, 4: 15000}
+            extra_cost = cost_map.get(level, 3000)
+
+            node = ox.distance.nearest_nodes(G, X=mid_lon, Y=mid_lat)
+            for u, v, k, d in G.edges(node, keys=True, data=True):
+                d['dynamic_cost'] = d.get('dynamic_cost', d.get('length', 1)) + extra_cost
+
+            risk_count += 1
+
+        print(f"  ✅ 壅塞路段：處理了 {risk_count} 個風險點")
 
     except Exception as e:
-        st.warning(f"⚠️ [Layer 4] 資料抓取失敗：{e}")
-        return G, markers
+        print(f"  ⚠️ [Layer 4] 壅塞資料抓取失敗：{e}")
 
-    if not data:
-        print("ℹ️ [Layer 4] 目前台南無即時交通事件")
-        return G, markers
+    # -------------------------------------------------------
+    # 來源2：最新道路消息（車禍、施工、封路）
+    # -------------------------------------------------------
+    news_count = 0
+    try:
+        url_news = (
+            "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/"
+            "Live/News/City/Tainan?$format=JSON"
+        )
+        res = requests.get(url_news, headers=headers, timeout=10)
+        res.raise_for_status()
+        news_data = res.json()
 
-    # ── Step 3：篩選中西區 + 依事件類型套用懲罰 ─────────────────────────────
-    count = 0
-    for event in data:
+        # 關鍵字判斷嚴重程度
+        high_risk_keywords = ['車禍', '事故', '封閉', '封路']
+        mid_risk_keywords = ['施工', '養護', '拓寬', '管線']
 
-        # 位置欄位（TDX RealTimeEvent 格式）
-        pos = event.get('EventLocation', {}).get('Position', {})
-        lat = pos.get('PositionLat')
-        lon = pos.get('PositionLon')
+        for item in news_data:
+            title = item.get('Title', '') + item.get('Description', '')
 
-        if not lat or not lon:
-            continue
-        if not (LAT_MIN <= lat <= LAT_MAX and LON_MIN <= lon <= LON_MAX):
-            continue
+            pos = item.get('StartPosition', {}) or item.get('Position', {})
+            lat = pos.get('PositionLat')
+            lon = pos.get('PositionLon')
 
-        event_type_code = event.get('EventType', 5)
-        type_name, penalty = LAYER4.get(event_type_code, ("其他異常", 100))
-        description = event.get('Description', '')
+            if not lat or not lon:
+                continue
 
-        try:
+            if district_boundary and not Point(lon, lat).within(district_boundary):
+                continue
+
+            # 根據關鍵字決定成本加成
+            if any(kw in title for kw in high_risk_keywords):
+                extra_cost = 20000
+            elif any(kw in title for kw in mid_risk_keywords):
+                extra_cost = 8000
+            else:
+                extra_cost = 3000
+
             node = ox.distance.nearest_nodes(G, X=lon, Y=lat)
-            for u, v, k, d in G.edges(keys=True, data=True):
-                if u == node or v == node:
-                    d['dynamic_cost'] = d.get('dynamic_cost', 1.0) * penalty
+            for u, v, k, d in G.edges(node, keys=True, data=True):
+                d['dynamic_cost'] = d.get('dynamic_cost', d.get('length', 1)) + extra_cost
 
-            markers.append({
-                "lat":       lat,
-                "lon":       lon,
-                "type":      type_name,
-                "type_code": event_type_code,
-                "desc":      description,
-                "penalty":   penalty,
-                "layer":     "accident",
-            })
-            count += 1
+            news_count += 1
 
-        except Exception:
-            continue
+        print(f"  ✅ 道路事件：處理了 {news_count} 個風險點（車禍/施工/封路）")
 
-    print(f"✅ [Layer 4] 中西區內發現 {count} 筆交通事件")
-    return G, markers
+    except Exception as e:
+        print(f"  ⚠️ [Layer 4] 道路事件資料抓取失敗：{e}")
+
+    print(f"🚨 [Layer 4] 完成！共處理 {risk_count + news_count} 個風險點")
+    return G
