@@ -292,10 +292,10 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
 
             # Layer 6：垃圾車清運避險
             if activate_garbage:
-                G_run, garbage_markers, garbage_active = apply_garbage_risk(G_run)
+                G_run, garbage_markers, garbage_active, garbage_label = apply_garbage_risk(G_run)
                 all_markers.extend(garbage_markers)
                 if garbage_active:
-                    st.warning(f"🗑️ Layer 6：垃圾車清運時段，{len(garbage_markers)} 個路段已套用避險")
+                    st.warning(f"🗑️ Layer 6：{garbage_label}清運時段（含誤點緩衝），{len(garbage_markers)} 個路段已套用避險")
 
             # 地理編碼
             s_lat, s_lon = get_location(start_loc)
