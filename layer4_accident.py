@@ -70,7 +70,21 @@ def apply_accident_risk(G, client_id, client_secret):
     try:
         res  = requests.get(url, headers=headers, timeout=15)
         res.raise_for_status()
-        data = res.json()
+        raw  = res.json()
+
+        # TDX RealTimeEvent 有時回傳 {"RealTimeEventList": [...]}
+        # 有時直接回傳 list，需要兩種都處理
+        if isinstance(raw, list):
+            data = raw
+        elif isinstance(raw, dict):
+            # 嘗試常見的外層 key
+            data = (raw.get('RealTimeEventList')
+                    or raw.get('EventList')
+                    or raw.get('data')
+                    or [])
+        else:
+            data = []
+
     except Exception as e:
         st.warning(f"⚠️ [Layer 4] 資料抓取失敗：{e}")
         return G, markers

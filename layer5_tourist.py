@@ -17,43 +17,12 @@ Layer 5：觀光熱區人流避險
 import requests
 import osmnx as ox
 from datetime import datetime
+from weights import LAYER5
 
 
 # ── 中西區 bounding box ──────────────────────────────────────────────────────
 LAT_MIN, LAT_MAX = 22.985, 23.005
 LON_MIN, LON_MAX = 120.185, 120.215
-
-# ── 景點類型時段係數表 ────────────────────────────────────────────────────────
-# 結構：{ 類型代號: { (weekday, hour_start, hour_end): penalty } }
-# weekday: 0-4=平日, 5-6=假日, None=每天
-# penalty: 懲罰倍率（乘在 dynamic_cost 上）
-
-CROWD_PROFILE = {
-    "temple":   [   # 廟宇、古蹟（赤崁樓、孔廟等）
-        {"day": "weekday", "hour_start":  9, "hour_end": 17, "penalty":  8},
-        {"day": "weekend", "hour_start":  9, "hour_end": 18, "penalty": 20},
-        {"day": "all",     "hour_start": 17, "hour_end": 21, "penalty": 12},
-    ],
-    "nightmarket": [  # 夜市、美食街（國華街、武聖夜市等）
-        {"day": "all",     "hour_start": 17, "hour_end": 23, "penalty": 25},
-        {"day": "weekend", "hour_start": 12, "hour_end": 17, "penalty": 12},
-        {"day": "weekday", "hour_start": 12, "hour_end": 17, "penalty":  5},
-    ],
-    "oldstreet": [  # 老街、文青商圈（神農街、正興街、海安路）
-        {"day": "all",     "hour_start": 18, "hour_end": 23, "penalty": 20},
-        {"day": "weekend", "hour_start": 14, "hour_end": 18, "penalty": 15},
-        {"day": "weekday", "hour_start": 14, "hour_end": 18, "penalty":  8},
-    ],
-    "landmark": [   # 一般地標商圈（林百貨、台南火車站周邊）
-        {"day": "weekend", "hour_start": 10, "hour_end": 21, "penalty": 15},
-        {"day": "weekday", "hour_start": 12, "hour_end": 18, "penalty":  6},
-    ],
-    "park": [       # 公園、廣場
-        {"day": "weekend", "hour_start":  8, "hour_end": 18, "penalty": 10},
-        {"day": "weekday", "hour_start":  7, "hour_end":  9, "penalty":  5},
-        {"day": "weekday", "hour_start": 17, "hour_end": 19, "penalty":  5},
-    ],
-}
 
 # ── 人工標注的中西區重要景點（TDX API 抓到後會疊加，這裡是保底清單）──────────
 # 若 TDX 抓取失敗，仍可使用此清單確保系統正常運作
@@ -133,7 +102,7 @@ def _calc_penalty(spot_type: str, now: datetime) -> int:
     依景點類型 × 現在時間，查詢時段係數表，回傳懲罰倍率。
     若現在不在任何高峰時段，回傳 1（不加懲罰）。
     """
-    profiles = CROWD_PROFILE.get(spot_type, [])
+    profiles = LAYER5.get(spot_type, [])
     is_weekend = now.weekday() >= 5
     h = now.hour
     best = 1
