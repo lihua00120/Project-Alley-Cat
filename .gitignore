@@ -5,3 +5,6 @@
 # 忽略 Python 產生的快取檔案
 __pycache__/
 *.pyc
+
+# 忽略所有 Jupyter Notebook 檔案
+*.ipynb
