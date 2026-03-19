@@ -12,7 +12,8 @@ import itertools
 
 from layer2_bus      import apply_bus_risk
 from layer4_accident import apply_accident_risk
-from layer5_tourist  import apply_tourist_risk, auto_detect_level, TOURIST_ZONES
+from layer5_tourist  import apply_tourist_risk
+from weights         import STATIC, LAYER3
 
 load_dotenv()
 TDX_CLIENT_ID     = os.getenv("TDX_CLIENT_ID")
@@ -23,7 +24,22 @@ GOOGLE_API_KEY    = os.getenv("GOOGLE_API_KEY")
 # 頁面設定
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Project Alley-Cat", layout="wide")
-st.title("🐈 Project Alley-Cat：避險雷達")
+
+# ── 右上角：日期選擇 + 標題（用欄位排版）────────────────────────────────────
+col_title, col_date = st.columns([3, 1])
+with col_title:
+    st.title("🐈 Project Alley-Cat：避險雷達")
+with col_date:
+    st.write("")   # 推到同高
+    selected_date = st.date_input(
+        "📅 配送日期",
+        value=date.today(),
+        min_value=date(2026, 1, 1),
+        max_value=date(2027, 12, 31),
+        label_visibility="visible",
+    )
+
+st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSV 載入（Layer 3 人為管制事件）
@@ -53,7 +69,7 @@ def load_event_csv():
 event_df = load_event_csv()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 路網載入 + 靜態權重（修正版）
+# 路網載入 + 靜態權重
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_base_graph():
@@ -66,15 +82,10 @@ def load_base_graph():
         highway = data.get('highway', '')
         if isinstance(highway, list):
             highway = highway[0]
-
-        # ✅ 單行道不懲罰（OSM 已限制逆向，懲罰反而讓路由走小路）
-        # ✅ 窄巷 ×5（原 ×70 太高）
         if highway in narrow_types:
-            cost *= 5
-        # ✅ 死巷 ×10（原 ×100 太高，目的地在死巷會無解）
+            cost *= STATIC["narrow_road"]
         if u in dead_end_nodes or v in dead_end_nodes:
-            cost *= 10
-
+            cost *= STATIC["dead_end"]
         data['dynamic_cost'] = cost
     return G
 
@@ -109,7 +120,7 @@ def apply_event_risk(G, sel_date: date):
     if active.empty:
         return G, []
 
-    penalty_map = {"廟會宴客": 200, "廟會祭拜": 150, "其他": 80}
+    penalty_map = LAYER3
     markers = []
 
     for _, row in active.iterrows():
@@ -134,9 +145,6 @@ def apply_event_risk(G, sel_date: date):
             continue
 
     return G, markers
-
-# Layer 4 → layer4_accident.py（apply_accident_risk）
-# Layer 5 → layer5_tourist.py（apply_tourist_risk, auto_detect_level, TOURIST_ZONES）
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 貪婪多目的地路線（TSP 近似）
@@ -164,38 +172,37 @@ def greedy_route(G, orig, dest_nodes):
     return order, segments
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 側邊欄 UI
+# 側邊欄 UI（精簡版，移除開發者資訊）
 # ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("🕹️ 導航控制")
 
-# ── 日期 ──────────────────────────────────────────────────────────────────────
-selected_date = st.sidebar.date_input(
-    "📅 選擇送貨日期", value=date.today(),
-    min_value=date(2026, 1, 1), max_value=date(2027, 12, 31),
-)
+# ── 當天管制事件提示（只顯示數量，不顯示詳細清單）──────────────────────────
+active_preview = event_df[
+    event_df["開始時間"].notna() &
+    event_df["結束時間"].notna() &
+    (event_df["開始時間"].dt.date <= selected_date) &
+    (event_df["結束時間"].dt.date  >= selected_date)
+] if not event_df.empty else pd.DataFrame()
 
-with st.sidebar.expander("📋 當天管制事件預覽"):
-    if event_df.empty:
-        st.write("CSV 未載入")
+if not active_preview.empty:
+    st.sidebar.warning(f"⚠️ 當天有 **{len(active_preview)}** 筆道路管制（廟會 / 活動）")
+else:
+    st.sidebar.success("✅ 當天無道路管制事件")
+
+# 展開才看到詳細（給司機查用）
+with st.sidebar.expander("📋 查看當天管制詳情"):
+    if active_preview.empty:
+        st.write("無管制事件")
     else:
-        preview = event_df[
-            event_df["開始時間"].notna() &
-            event_df["結束時間"].notna() &
-            (event_df["開始時間"].dt.date <= selected_date) &
-            (event_df["結束時間"].dt.date  >= selected_date)
-        ]
-        if preview.empty:
-            st.write("當天無管制事件 ✅")
-        else:
-            icon_map = {"廟會宴客": "🏮", "廟會祭拜": "🙏", "其他": "⚠️"}
-            for _, r in preview.iterrows():
-                icon = icon_map.get(str(r.get("申請種類","其他")).strip(), "⚠️")
-                st.markdown(
-                    f"{icon} **{r.get('申請種類','')}**  \n"
-                    f"📍 {r.get('核准路段','')}  \n"
-                    f"🕐 {r.get('使用日期','')}"
-                )
-                st.divider()
+        icon_map = {"廟會宴客": "🏮", "廟會祭拜": "🙏", "其他": "⚠️"}
+        for _, r in active_preview.iterrows():
+            icon = icon_map.get(str(r.get("申請種類","")).strip(), "⚠️")
+            st.markdown(
+                f"{icon} **{r.get('申請種類','')}**  \n"
+                f"📍 {r.get('核准路段','')}  \n"
+                f"🕐 {r.get('使用日期','')}"
+            )
+            st.divider()
 
 st.sidebar.markdown("---")
 
@@ -223,47 +230,14 @@ if st.sidebar.button("➕ 新增目的地", use_container_width=True):
 
 st.sidebar.markdown("---")
 
-# ── 避險層開關 ─────────────────────────────────────────────────────────────────
-st.sidebar.markdown("**🛡️ 避險層設定**")
-activate_bus      = st.sidebar.checkbox("🚌 Layer 2：公車即時避險",    value=True)
-activate_events   = st.sidebar.checkbox("🎪 Layer 3：廟會 / 人為管制",  value=True)
-activate_accident = st.sidebar.checkbox("🚨 Layer 4：即時車禍 / 事故",  value=True)
-activate_tourist  = st.sidebar.checkbox("📸 Layer 5：觀光熱區避險",    value=True)
+# ── 避險層開關（只保留對司機有意義的開關）──────────────────────────────────
+st.sidebar.markdown("**🛡️ 避險選項**")
+activate_bus      = st.sidebar.checkbox("🚌 公車動態避險",   value=True)
+activate_events   = st.sidebar.checkbox("🎪 廟會 / 活動避險", value=True)
+activate_accident = st.sidebar.checkbox("🚨 即時車禍避險",   value=True)
+activate_tourist  = st.sidebar.checkbox("📸 觀光熱區避險",   value=True)
 
-# 觀光熱度（自動判斷 + 可手動調整）
-if activate_tourist:
-    auto_level = auto_detect_level()   # 從 layer5_tourist 匯入
-    level_map  = {"low": "低 ×3（平日早上）", "medium": "中 ×8（平日下午）", "high": "高 ×20（假日 / 夜間）"}
-    level_display = st.sidebar.selectbox(
-        "觀光熱度等級",
-        options=["low", "medium", "high"],
-        index=["low", "medium", "high"].index(auto_level),
-        format_func=lambda x: level_map[x],
-        help="系統已根據現在時間自動建議，可手動調整"
-    )
-else:
-    level_display = "low"
-
-with st.sidebar.expander("🗺️ 觀光熱區清單"):
-    for _, _, name, desc in TOURIST_ZONES:
-        st.markdown(f"📍 **{name}**：{desc}")
-
-with st.sidebar.expander("ℹ️ 完整權重說明"):
-    st.markdown("""
-| 層級 | 情境 | 倍率 |
-|------|------|------|
-| 靜態 | 一般道路 | ×1 |
-| 靜態 | 窄巷 / 小路 | ×5 |
-| 靜態 | 死巷節點 | ×10 |
-| L2 | 公車站即時 | ×5 |
-| L3 | 廟會祭拜 | ×150 |
-| L3 | 廟會宴客 | ×200 |
-| L3 | 其他人為管制 | ×80 |
-| L4 | 即時車禍 / 事故 | ×500 |
-| L5 | 觀光熱區（低）| ×3 |
-| L5 | 觀光熱區（中）| ×8 |
-| L5 | 觀光熱區（高）| ×20 |
-    """)
+st.sidebar.markdown("---")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 導航執行
@@ -271,6 +245,8 @@ with st.sidebar.expander("ℹ️ 完整權重說明"):
 ROUTE_COLORS = ["#00E676", "#FF6D00", "#2979FF", "#D500F9", "#FFEA00", "#00BCD4"]
 STOP_COLORS  = ['red', 'orange', 'purple', 'darkred', 'cadetblue']
 EVENT_ICONS  = {"廟會宴客": "🏮", "廟會祭拜": "🙏", "其他": "⚠️"}
+TYPE_LABELS  = {"temple": "廟宇古蹟", "nightmarket": "夜市美食",
+                "oldstreet": "老街商圈", "landmark": "地標商場", "park": "公園廣場"}
 
 if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=True):
 
@@ -285,38 +261,32 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
         try:
             G_run = G_base.copy()
 
-            # Layer 2：公車
+            # Layer 2：公車即時
             if activate_bus:
                 if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
                     G_run = apply_bus_risk(G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET)
                 else:
-                    st.warning("⚠️ 未設定 TDX 金鑰，跳過公車避險層")
+                    st.warning("⚠️ 未設定 TDX 金鑰，跳過公車避險")
 
             # Layer 3：人為管制
             if activate_events:
                 G_run, ev_markers = apply_event_risk(G_run, selected_date)
                 all_markers.extend(ev_markers)
-                if ev_markers:
-                    st.info(f"🎪 Layer 3：套用 {len(ev_markers)} 筆人為管制")
 
             # Layer 4：即時車禍
             if activate_accident:
                 if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
                     G_run, acc_markers = apply_accident_risk(G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET)
                     all_markers.extend(acc_markers)
-                    if acc_markers:
-                        st.warning(f"🚨 Layer 4：偵測到 {len(acc_markers)} 筆即時車禍 / 事故")
-                    else:
-                        st.success("✅ Layer 4：目前中西區無即時交通事件")
                 else:
-                    st.warning("⚠️ 未設定 TDX 金鑰，跳過車禍避險層")
+                    st.warning("⚠️ 未設定 TDX 金鑰，跳過車禍避險")
 
-            # Layer 5：觀光熱區
+            # Layer 5：觀光熱區（TDX 官方景點 + 時段模型）
             if activate_tourist:
-                G_run, tour_markers, actual_level = apply_tourist_risk(G_run, level_display)
+                G_run, tour_markers, tour_summary = apply_tourist_risk(
+                    G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET
+                )
                 all_markers.extend(tour_markers)
-                penalty_val = {'low': 3, 'medium': 8, 'high': 20}[actual_level]
-                st.info(f"📸 Layer 5：套用 {len(tour_markers)} 個觀光熱區（×{penalty_val}）")
 
             # 地理編碼
             s_lat, s_lon = get_location(start_loc)
@@ -338,7 +308,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
             # 多目的地路線
             ordered_nodes, segments = greedy_route(G_run, orig, [d["node"] for d in dest_info])
 
-            # 統計
+            # ── 統計指標 ───────────────────────────────────────────────────────
             total_len  = sum(G_run[u][v][0].get('length', 0) for s in segments for u, v in zip(s[:-1], s[1:]))
             acc_count  = sum(1 for m in all_markers if m.get("layer") == "accident")
             ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
@@ -347,11 +317,15 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
             c2.metric("📦 配送站數",   f"{len(ordered_nodes)}")
-            c3.metric("🚨 即時車禍",   f"{acc_count} 筆")
-            c4.metric("🎪 人為管制",   f"{ev_count} 筆")
+            c3.metric("🚨 即時事故",   f"{acc_count} 筆")
+            c4.metric("🎪 道路管制",   f"{ev_count} 筆")
             c5.metric("📸 觀光熱區",   f"{tour_count} 個")
 
-            # 送貨順序表
+            # Layer 5 摘要（給司機看，有數據來源說明）
+            if activate_tourist:
+                st.info(f"📸 觀光熱區資訊：{tour_summary}（資料來源：TDX 交通部觀光署）")
+
+            # ── 送貨順序表 ─────────────────────────────────────────────────────
             st.subheader("📋 建議配送順序")
             rows = []
             for rank, node in enumerate(ordered_nodes):
@@ -365,7 +339,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-            # ── 地圖 ──────────────────────────────────────────────────────────
+            # ── 地圖 ───────────────────────────────────────────────────────────
             m = folium.Map(
                 location=[s_lat, s_lon], zoom_start=15,
                 tiles='http://mt0.google.com/vt/lyrs=m&hl=zh-TW&x={x}&y={y}&z={z}',
@@ -440,29 +414,34 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                     ).add_to(m)
 
                 elif layer == "accident":
+                    # 依事件類型決定顏色
+                    acc_color = {1: 'red', 2: 'gray', 3: 'orange', 4: 'darkred', 5: 'orange'
+                                 }.get(mk.get("type_code", 5), 'orange')
                     folium.Marker(
                         location=[mk["lat"], mk["lon"]],
                         popup=(
-                            f"🚨 <b>即時交通事件</b><br>"
-                            f"類型：{mk['type']}<br>"
-                            f"說明：{mk['desc']}"
+                            f"🚨 <b>{mk['type']}</b><br>"
+                            f"說明：{mk['desc'] or '（無詳細說明）'}<br>"
+                            f"路徑懲罰：×{mk.get('penalty', 100)}"
                         ),
                         tooltip=f"🚨 {mk['type']}",
-                        icon=folium.Icon(color='orange', icon='exclamation-triangle', prefix='fa')
+                        icon=folium.Icon(color=acc_color, icon='exclamation-triangle', prefix='fa')
                     ).add_to(m)
 
                 elif layer == "tourist":
-                    penalty_label = {3: "低熱度", 8: "中熱度", 20: "高熱度"}.get(
-                        mk["penalty"], str(mk["penalty"])
+                    penalty_label = (
+                        "高峰" if mk["penalty"] >= 15 else
+                        "中峰" if mk["penalty"] >= 8  else "低峰"
                     )
+                    src_label = "TDX官方" if mk.get("source") == "TDX" else "內建"
                     folium.Marker(
                         location=[mk["lat"], mk["lon"]],
                         popup=(
-                            f"📸 <b>{mk['name']}</b><br>"
-                            f"{mk['desc']}<br>"
-                            f"熱度：{penalty_label}（×{mk['penalty']}）"
+                            f"📸 <b>{mk['name']}</b>（{TYPE_LABELS.get(mk['type'], mk['type'])}）<br>"
+                            f"目前人潮：{penalty_label}（懲罰 ×{mk['penalty']}）<br>"
+                            f"資料來源：{src_label}"
                         ),
-                        tooltip=f"📸 {mk['name']}",
+                        tooltip=f"📸 {mk['name']}（{penalty_label}）",
                         icon=folium.Icon(color='purple', icon='camera', prefix='fa')
                     ).add_to(m)
 

@@ -2,20 +2,22 @@ import requests
 import osmnx as ox
 from shapely.geometry import Point
 from datetime import datetime
+from weights import LAYER2
 
 
 def apply_bus_risk(G, client_id, client_secret):
-
-    # ── 時間判斷：非行駛時段直接跳過 ──────────────────
+    """
+    Layer 2：掃描台南公車即時到站資料，對有公車停靠的路段加掛懲罰。
+    非行駛時段（22:00 後 / 06:00 前）自動跳過，不加任何懲罰。
+    """
     current_hour = datetime.now().hour
-    # 台南公車大約 06:00 ~ 22:00 運行
     if not (6 <= current_hour <= 22):
         print(f"🌙 [Layer 2] 現在 {current_hour} 時，公車未運行，跳過避險層")
-        return G  # ← 直接還原，不加任何懲罰
+        return G
 
     print("🚌 [Layer 2] 公車行駛時段，正在掃描即時風險...")
 
-    # ── 取得 Token ────────────────────────────────────
+    # ── Token ─────────────────────────────────────────────────────────────────
     auth_url = (
         "https://tdx.transportdata.tw/auth/realms/TDXConnect"
         "/protocol/openid-connect/token"
@@ -34,11 +36,11 @@ def apply_bus_risk(G, client_id, client_secret):
 
     headers = {'authorization': f'Bearer {token}'}
 
-    # ── 抓即時到站資料（有資料 = 現在有公車在跑）────────
+    # ── 即時到站資料（5 分鐘內會到站的班次）────────────────────────────────
     eta_url = (
         "https://tdx.transportdata.tw/api/basic/v2/Bus"
         "/EstimatedTimeOfArrival/City/Tainan"
-        "?$filter=EstimateTime le 300"   # 5分鐘內會到站的班次
+        "?$filter=EstimateTime le 300"
         "&$select=StopPosition,StopName"
         "&$format=JSON"
     )
@@ -60,14 +62,13 @@ def apply_bus_risk(G, client_id, client_secret):
                 )
 
         unique_stops = set(active_stop_nodes)
-
         if not unique_stops:
             print("ℹ️ [Layer 2] 目前中西區無即時公車，不套用懲罰")
             return G
 
         for u, v, k, d in G.edges(keys=True, data=True):
             if u in unique_stops or v in unique_stops:
-                d['dynamic_cost'] = d.get('dynamic_cost', d.get('length', 1.0)) * 5
+                d['dynamic_cost'] = d.get('dynamic_cost', d.get('length', 1.0)) * LAYER2["bus_stop"]
 
         print(f"✅ [Layer 2] 已處理 {len(unique_stops)} 個即時公車風險點")
 
