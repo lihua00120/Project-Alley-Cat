@@ -10,10 +10,10 @@ from dotenv import load_dotenv
 import streamlit.components.v1 as components
 import itertools
 
-from layer2_bus      import apply_bus_risk
-from layer4_accident import apply_traffic_risk
-from layer5_tourist  import apply_tourist_risk
-from weights         import STATIC, LAYER3
+from layer2_bus                    import apply_bus_risk
+from layer4_accident               import apply_traffic_risk
+from layer5_human_caused_event     import apply_tourist_risk
+from weights                       import STATIC, LAYER3
 
 load_dotenv()
 TDX_CLIENT_ID     = os.getenv("TDX_CLIENT_ID")
@@ -39,6 +39,28 @@ with col_date:
     )
 
 st.divider()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 即時事件警示橫幅（頁面頂部，常駐顯示，每 60 秒更新）
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=60)
+def fetch_alerts(client_id, client_secret):
+    try:
+        _, _, alerts = apply_traffic_risk(None, client_id, client_secret)
+        return alerts
+    except Exception:
+        return []
+
+if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
+    top_alerts = fetch_alerts(TDX_CLIENT_ID, TDX_CLIENT_SECRET)
+    if top_alerts:
+        with st.expander(f"🚨 台南市即時道路事件（{len(top_alerts)} 筆）", expanded=True):
+            for a in top_alerts:
+                st.markdown(
+                    f"{a['icon']} **{a['kind']}**　{a['desc']}　"
+                    f"<span style='color:gray;font-size:0.85em'>{a['time']}</span>",
+                    unsafe_allow_html=True
+                )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSV 載入（Layer 3 人為管制事件）
@@ -226,10 +248,10 @@ if st.sidebar.button("➕ 新增目的地", use_container_width=True):
 st.sidebar.markdown("---")
 
 st.sidebar.markdown("**🛡️ 避險選項**")
-activate_bus      = st.sidebar.checkbox("🚌 公車動態避險",   value=True)
+activate_bus      = st.sidebar.checkbox("🚌 公車動態避險",    value=True)
 activate_events   = st.sidebar.checkbox("🎪 廟會 / 活動避險", value=True)
-activate_accident = st.sidebar.checkbox("🚨 即時車禍避險",   value=True)
-activate_tourist  = st.sidebar.checkbox("📸 觀光熱區避險",   value=True)
+activate_accident = st.sidebar.checkbox("🚨 即時車禍避險",    value=True)
+activate_tourist  = st.sidebar.checkbox("📸 觀光熱區避險",    value=True)
 
 st.sidebar.markdown("---")
 
@@ -240,7 +262,8 @@ ROUTE_COLORS = ["#00E676", "#FF6D00", "#2979FF", "#D500F9", "#FFEA00", "#00BCD4"
 STOP_COLORS  = ['red', 'orange', 'purple', 'darkred', 'cadetblue']
 EVENT_ICONS  = {"廟會宴客": "🏮", "廟會祭拜": "🙏", "其他": "⚠️"}
 TYPE_LABELS  = {"temple": "廟宇古蹟", "nightmarket": "夜市美食",
-                "oldstreet": "老街商圈", "landmark": "地標商場", "park": "公園廣場"}
+                "oldstreet": "老街商圈", "landmark": "地標商場", "park": "公園廣場",
+                "school": "學校周邊", "market": "傳統市場"}
 
 if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=True):
 
@@ -250,6 +273,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
         st.stop()
 
     all_markers = []
+    acc_alerts  = []
 
     with st.spinner("正在計算最佳多點避險路徑..."):
         try:
@@ -267,15 +291,17 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                 G_run, ev_markers = apply_event_risk(G_run, selected_date)
                 all_markers.extend(ev_markers)
 
-            # Layer 4：即時車禍
+            # Layer 4：即時車禍（無座標，只回傳 alerts 供顯示）
             if activate_accident:
                 if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
-                    G_run, acc_markers = apply_traffic_risk(G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET)
+                    G_run, acc_markers, acc_alerts = apply_traffic_risk(
+                        G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET
+                    )
                     all_markers.extend(acc_markers)
                 else:
                     st.warning("⚠️ 未設定 TDX 金鑰，跳過車禍避險")
 
-            # Layer 5：觀光熱區
+            # Layer 5：人類活動（觀光 + 學校 + 市場）
             if activate_tourist:
                 G_run, tour_markers, tour_summary = apply_tourist_risk(
                     G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET
@@ -302,21 +328,30 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
             # 多目的地路線
             ordered_nodes, segments = greedy_route(G_run, orig, [d["node"] for d in dest_info])
 
+            # ── 即時事件提示（導航結果頁也顯示）────────────────────────────────
+            if acc_alerts:
+                with st.expander(f"🚨 本次導航參考事件（{len(acc_alerts)} 筆）", expanded=False):
+                    for a in acc_alerts:
+                        st.markdown(
+                            f"{a['icon']} **{a['kind']}**　{a['desc']}　"
+                            f"<span style='color:gray;font-size:0.85em'>{a['time']}</span>",
+                            unsafe_allow_html=True
+                        )
+
             # ── 統計指標 ───────────────────────────────────────────────────────
             total_len  = sum(G_run[u][v][0].get('length', 0) for s in segments for u, v in zip(s[:-1], s[1:]))
-            acc_count  = sum(1 for m in all_markers if m.get("layer") == "accident")
             ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
             tour_count = sum(1 for m in all_markers if m.get("layer") == "tourist")
 
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
             c2.metric("📦 配送站數",   f"{len(ordered_nodes)}")
-            c3.metric("🚨 即時事故",   f"{acc_count} 筆")
+            c3.metric("🚨 即時事故",   f"{len(acc_alerts)} 筆")
             c4.metric("🎪 道路管制",   f"{ev_count} 筆")
             c5.metric("📸 觀光熱區",   f"{tour_count} 個")
 
             if activate_tourist:
-                st.info(f"📸 觀光熱區資訊：{tour_summary}（資料來源：TDX 交通部觀光署）")
+                st.info(f"📸 {tour_summary}")
 
             # ── 送貨順序表 ─────────────────────────────────────────────────────
             st.subheader("📋 建議配送順序")
@@ -406,35 +441,35 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                         tooltip=f"🎪 {mk['kind']}"
                     ).add_to(m)
 
-                elif layer == "accident":
-                    acc_color = {1: 'red', 2: 'gray', 3: 'orange', 4: 'darkred', 5: 'orange'
-                                 }.get(mk.get("type_code", 5), 'orange')
-                    folium.Marker(
-                        location=[mk["lat"], mk["lon"]],
-                        popup=(
-                            f"🚨 <b>{mk['type']}</b><br>"
-                            f"說明：{mk['desc'] or '（無詳細說明）'}<br>"
-                            f"路徑懲罰：×{mk.get('penalty', 100)}"
-                        ),
-                        tooltip=f"🚨 {mk['type']}",
-                        icon=folium.Icon(color=acc_color, icon='exclamation-triangle', prefix='fa')
-                    ).add_to(m)
-
                 elif layer == "tourist":
-                    penalty_label = (
-                        "高峰" if mk["penalty"] >= 15 else
-                        "中峰" if mk["penalty"] >= 8  else "低峰"
+                    # 學校和市場走這裡，觀光景點也走這裡
+                    if mk["type"] == "school":
+                        icon_name, color = 'graduation-cap', 'blue'
+                    elif mk["type"] == "market":
+                        icon_name, color = 'shopping-cart', 'green'
+                    else:
+                        penalty_label = (
+                            "高峰" if mk["penalty"] >= 15 else
+                            "中峰" if mk["penalty"] >= 8  else "低峰"
+                        )
+                        icon_name = 'camera'
+                        color     = 'purple'
+
+                    label = mk.get("label") or (
+                        "高峰" if mk.get("penalty", 0) >= 15 else
+                        "中峰" if mk.get("penalty", 0) >= 8  else "低峰"
                     )
                     src_label = "TDX官方" if mk.get("source") == "TDX" else "內建"
                     folium.Marker(
                         location=[mk["lat"], mk["lon"]],
                         popup=(
-                            f"📸 <b>{mk['name']}</b>（{TYPE_LABELS.get(mk['type'], mk['type'])}）<br>"
-                            f"目前人潮：{penalty_label}（懲罰 ×{mk['penalty']}）<br>"
+                            f"{'🏫' if mk['type']=='school' else '🛒' if mk['type']=='market' else '📸'} "
+                            f"<b>{mk['name']}</b>（{TYPE_LABELS.get(mk['type'], mk['type'])}）<br>"
+                            f"狀態：{label}（懲罰 ×{mk.get('penalty',0)}）<br>"
                             f"資料來源：{src_label}"
                         ),
-                        tooltip=f"📸 {mk['name']}（{penalty_label}）",
-                        icon=folium.Icon(color='purple', icon='camera', prefix='fa')
+                        tooltip=f"{'🏫' if mk['type']=='school' else '🛒' if mk['type']=='market' else '📸'} {mk['name']}（{label}）",
+                        icon=folium.Icon(color=color, icon=icon_name, prefix='fa')
                     ).add_to(m)
 
             if all_coords:
