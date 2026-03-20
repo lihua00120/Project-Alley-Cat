@@ -1,9 +1,6 @@
 """
-weights.py — 全系統避險權重集中管理
+weights.py 集合所有 Layer 的懲罰倍率
 ════════════════════════════════════════════════════════
-所有 Layer 的懲罰倍率都在這裡定義。
-日後調整只需改這一個檔案，不需要動 app.py / layer2~6。
-
 懲罰倍率的意義：
     dynamic_cost = 實際路段距離(m) × 各層倍率連乘
     倍率越高 → 路由演算法越傾向繞開該路段
@@ -12,7 +9,7 @@ weights.py — 全系統避險權重集中管理
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 車道數判斷：能否繞過障礙物（公車 / 垃圾車）
+# 車道數判斷：能否繞過障礙物（公車）
 # ─────────────────────────────────────────────────────────────────────────────
 LANE_BYPASS = {
     "bypass_multiplier": 1,
@@ -57,8 +54,8 @@ LAYER2 = {
 # 資料來源：table_result.csv（台南市道路使用申請核准資料）
 # ─────────────────────────────────────────────────────────────────────────────
 LAYER3 = {
-    "廟會宴客": 200,     # 辦桌占路，通常整條路段封閉
-    "廟會祭拜": 150,     # 祭拜人潮，路段半封閉
+    "廟會宴客": 100,     # 辦桌占路，通常整條路段封閉
+    "廟會祭拜": 100,     # 祭拜人潮，路段半封閉
     "其他":      80,     # 其他人為管制（市集、拍攝等）
 }
 
@@ -86,27 +83,19 @@ LAYER5 = {
     "temple": [             # 廟宇、古蹟（赤崁樓、孔廟等）
         {"day": "weekday", "hour_start":  9, "hour_end": 17, "penalty":  8},
         {"day": "weekend", "hour_start":  9, "hour_end": 18, "penalty": 20},
-        {"day": "all",     "hour_start": 17, "hour_end": 21, "penalty": 12},
     ],
-    "nightmarket": [        # 夜市、美食街（國華街等）
-        {"day": "all",     "hour_start": 17, "hour_end": 23, "penalty": 25},
+    "Food Court": [        # 夜市、美食街（國華街等）
         {"day": "weekend", "hour_start": 12, "hour_end": 17, "penalty": 12},
         {"day": "weekday", "hour_start": 12, "hour_end": 17, "penalty":  5},
     ],
     "oldstreet": [          # 老街、文青商圈（神農街、正興街、海安路）
-        {"day": "all",     "hour_start": 18, "hour_end": 23, "penalty": 20},
         {"day": "weekend", "hour_start": 14, "hour_end": 18, "penalty": 15},
         {"day": "weekday", "hour_start": 14, "hour_end": 18, "penalty":  8},
     ],
     "landmark": [           # 地標商場（林百貨、新光三越等）
-        {"day": "weekend", "hour_start": 10, "hour_end": 21, "penalty": 15},
+        {"day": "weekend", "hour_start": 10, "hour_end": 18, "penalty": 15},
         {"day": "weekday", "hour_start": 12, "hour_end": 18, "penalty":  6},
-    ],
-    "park": [               # 公園、廣場
-        {"day": "weekend", "hour_start":  8, "hour_end": 18, "penalty": 10},
-        {"day": "weekday", "hour_start":  7, "hour_end":  9, "penalty":  5},
-        {"day": "weekday", "hour_start": 17, "hour_end": 19, "penalty":  5},
-    ],
+    ]
 }
 
 # 學校上下學時段（週一~五）
