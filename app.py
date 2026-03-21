@@ -10,10 +10,13 @@ from dotenv import load_dotenv
 import streamlit.components.v1 as components
 import itertools
 
-from layer2_bus                    import apply_bus_risk
-from layer4_accident               import apply_traffic_risk
-from layer5_human_caused_event     import apply_tourist_risk
-from weights                       import STATIC, LAYER3
+from layer2_bus                import apply_bus_risk
+from layer4_accident           import apply_traffic_risk
+from layer5_human_caused_event import apply_tourist_risk
+from weights                   import STATIC, LAYER3
+from logistics                 import (load_orders, split_orders_by_slot,
+                                       assign_trucks, geocode_orders,
+                                       plan_routes, TIME_SLOT_LABEL)
 
 load_dotenv()
 TDX_CLIENT_ID     = os.getenv("TDX_CLIENT_ID")
@@ -63,7 +66,7 @@ if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
                 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CSV 載入（Layer 3 人為管制事件）
+# CSV 載入
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_event_csv():
@@ -73,7 +76,6 @@ def load_event_csv():
             break
         except Exception:
             df = pd.DataFrame()
-
     if df.empty:
         return df
 
@@ -87,7 +89,8 @@ def load_event_csv():
     df["結束時間"] = df["使用日期"].apply(lambda s: parse_dt(s, 1))
     return df
 
-event_df = load_event_csv()
+event_df  = load_event_csv()
+orders_df = load_orders("logistics.csv")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 路網載入 + 靜態權重
@@ -97,7 +100,6 @@ def load_base_graph():
     G = ox.graph_from_place("中西區, 台南市, 台灣", network_type='drive')
     dead_end_nodes = {n for n, deg in G.degree() if deg == 1}
     narrow_types   = {'living_street', 'alley', 'track', 'path'}
-
     for u, v, k, data in G.edges(keys=True, data=True):
         cost    = data.get('length', 1.0)
         highway = data.get('highway', '')
@@ -131,7 +133,6 @@ def get_location(address: str):
 def apply_event_risk(G, sel_date: date):
     if event_df.empty:
         return G, []
-
     active = event_df[
         event_df["開始時間"].notna() &
         event_df["結束時間"].notna() &
@@ -141,13 +142,11 @@ def apply_event_risk(G, sel_date: date):
     if active.empty:
         return G, []
 
-    penalty_map = LAYER3
     markers = []
-
     for _, row in active.iterrows():
         addr    = str(row.get("核准路段", "")).strip()
         kind    = str(row.get("申請種類", "其他")).strip()
-        penalty = penalty_map.get(kind, 80)
+        penalty = LAYER3.get(kind, 80)
         if not addr or addr == "nan":
             continue
         try:
@@ -164,11 +163,10 @@ def apply_event_risk(G, sel_date: date):
             })
         except Exception:
             continue
-
     return G, markers
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 貪婪多目的地路線（TSP 近似）
+# 貪婪多目的地路線（手動模式用）
 # ─────────────────────────────────────────────────────────────────────────────
 def greedy_route(G, orig, dest_nodes):
     remaining, current, order, segments = list(dest_nodes), orig, [], []
@@ -197,6 +195,7 @@ def greedy_route(G, orig, dest_nodes):
 # ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("🕹️ 導航控制")
 
+# 廟會管制提示
 active_preview = event_df[
     event_df["開始時間"].notna() &
     event_df["結束時間"].notna() &
@@ -225,25 +224,42 @@ with st.sidebar.expander("📋 查看當天管制詳情"):
 
 st.sidebar.markdown("---")
 
-start_loc = st.sidebar.text_input("📍 起點", value="臺南市中西區樹林街二段33號")
+# 起點
+start_loc = st.sidebar.text_input("📍 起點（營業所）", value="臺南市中西區樹林街二段33號")
 
-st.sidebar.markdown("**🏁 目的地清單**（可新增多個）")
-if "destinations" not in st.session_state:
-    st.session_state.destinations = ["臺南市中西區神農街135號"]
+# 配送模式切換
+st.sidebar.markdown("**🚚 配送模式**")
+mode = st.sidebar.radio("", ["📋 載入訂單", "✏️ 手動輸入"], horizontal=True)
 
-for i in range(len(st.session_state.destinations)):
-    cols = st.sidebar.columns([5, 1])
-    st.session_state.destinations[i] = cols[0].text_input(
-        f"目的地 {i+1}", value=st.session_state.destinations[i],
-        key=f"dest_{i}", label_visibility="collapsed"
-    )
-    if cols[1].button("✕", key=f"del_{i}"):
-        st.session_state.destinations.pop(i)
+if mode == "📋 載入訂單":
+    num_trucks = st.sidebar.number_input("貨車台數", min_value=1, max_value=6, value=2, step=1)
+    with st.sidebar.expander("📋 今日訂單清單"):
+        if not orders_df.empty:
+            st.dataframe(
+                orders_df[["order_id", "address", "content", "time_slot", "note"]],
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.write("無訂單資料")
+else:
+    st.sidebar.markdown("**🏁 目的地清單**（可新增多個）")
+    if "destinations" not in st.session_state:
+        st.session_state.destinations = ["臺南市中西區神農街135號"]
+
+    for i in range(len(st.session_state.destinations)):
+        cols = st.sidebar.columns([5, 1])
+        st.session_state.destinations[i] = cols[0].text_input(
+            f"目的地 {i+1}", value=st.session_state.destinations[i],
+            key=f"dest_{i}", label_visibility="collapsed"
+        )
+        if cols[1].button("✕", key=f"del_{i}"):
+            st.session_state.destinations.pop(i)
+            st.rerun()
+
+    if st.sidebar.button("➕ 新增目的地", use_container_width=True):
+        st.session_state.destinations.append("")
         st.rerun()
-
-if st.sidebar.button("➕ 新增目的地", use_container_width=True):
-    st.session_state.destinations.append("")
-    st.rerun()
 
 st.sidebar.markdown("---")
 
@@ -256,7 +272,7 @@ activate_tourist  = st.sidebar.checkbox("📸 觀光熱區避險",    value=True
 st.sidebar.markdown("---")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 導航執行
+# 常數
 # ─────────────────────────────────────────────────────────────────────────────
 ROUTE_COLORS = ["#00E676", "#FF6D00", "#2979FF", "#D500F9", "#FFEA00", "#00BCD4"]
 STOP_COLORS  = ['red', 'orange', 'purple', 'darkred', 'cadetblue']
@@ -265,12 +281,10 @@ TYPE_LABELS  = {"temple": "廟宇古蹟", "nightmarket": "夜市美食",
                 "oldstreet": "老街商圈", "landmark": "地標商場", "park": "公園廣場",
                 "school": "學校周邊", "market": "傳統市場"}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 導航執行
+# ─────────────────────────────────────────────────────────────────────────────
 if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=True):
-
-    valid_dests = [d.strip() for d in st.session_state.destinations if d.strip()]
-    if not valid_dests:
-        st.error("請至少輸入一個目的地！")
-        st.stop()
 
     all_markers = []
     acc_alerts  = []
@@ -291,7 +305,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                 G_run, ev_markers = apply_event_risk(G_run, selected_date)
                 all_markers.extend(ev_markers)
 
-            # Layer 4：即時車禍（無座標，只回傳 alerts 供顯示）
+            # Layer 4：即時車禍
             if activate_accident:
                 if TDX_CLIENT_ID and TDX_CLIENT_SECRET:
                     G_run, acc_markers, acc_alerts = apply_traffic_risk(
@@ -301,34 +315,18 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                 else:
                     st.warning("⚠️ 未設定 TDX 金鑰，跳過車禍避險")
 
-            # Layer 5：人類活動（觀光 + 學校 + 市場）
+            # Layer 5：人類活動
             if activate_tourist:
                 G_run, tour_markers, tour_summary = apply_tourist_risk(
                     G_run, TDX_CLIENT_ID, TDX_CLIENT_SECRET
                 )
                 all_markers.extend(tour_markers)
 
-            # 地理編碼
+            # 地理編碼起點
             s_lat, s_lon = get_location(start_loc)
             orig = ox.distance.nearest_nodes(G_run, X=s_lon, Y=s_lat)
 
-            dest_info = []
-            for addr in valid_dests:
-                try:
-                    lat, lon = get_location(addr)
-                    node     = ox.distance.nearest_nodes(G_run, X=lon, Y=lat)
-                    dest_info.append({"addr": addr, "lat": lat, "lon": lon, "node": node})
-                except Exception as e:
-                    st.warning(f"⚠️ 無法解析「{addr}」：{e}")
-
-            if not dest_info:
-                st.error("所有目的地均無法解析，請檢查地址。")
-                st.stop()
-
-            # 多目的地路線
-            ordered_nodes, segments = greedy_route(G_run, orig, [d["node"] for d in dest_info])
-
-            # ── 即時事件提示（導航結果頁也顯示）────────────────────────────────
+            # ── 即時事件提示 ──────────────────────────────────────────────────
             if acc_alerts:
                 with st.expander(f"🚨 本次導航參考事件（{len(acc_alerts)} 筆）", expanded=False):
                     for a in acc_alerts:
@@ -338,96 +336,233 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                             unsafe_allow_html=True
                         )
 
-            # ── 統計指標 ───────────────────────────────────────────────────────
-            total_len  = sum(G_run[u][v][0].get('length', 0) for s in segments for u, v in zip(s[:-1], s[1:]))
-            ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
-            tour_count = sum(1 for m in all_markers if m.get("layer") == "tourist")
+            # ─────────────────────────────────────────────────────────────────
+            # 訂單模式
+            # ─────────────────────────────────────────────────────────────────
+            if mode == "📋 載入訂單":
+                if orders_df.empty:
+                    st.error("找不到訂單資料，請確認 logistics.csv 是否存在。")
+                    st.stop()
 
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
-            c2.metric("📦 配送站數",   f"{len(ordered_nodes)}")
-            c3.metric("🚨 即時事故",   f"{len(acc_alerts)} 筆")
-            c4.metric("🎪 道路管制",   f"{ev_count} 筆")
-            c5.metric("📸 觀光熱區",   f"{tour_count} 個")
+                groups      = split_orders_by_slot(orders_df)
+                assignments = assign_trucks(groups, int(num_trucks))
+                assignments = geocode_orders(assignments, get_location)
+                assignments = plan_routes(assignments, G_run, s_lat, s_lon)
 
-            if activate_tourist:
-                st.info(f"📸 {tour_summary}")
+                if not assignments:
+                    st.error("所有訂單地址均無法解析。")
+                    st.stop()
 
-            # ── 送貨順序表 ─────────────────────────────────────────────────────
-            st.subheader("📋 建議配送順序")
-            rows = []
-            for rank, node in enumerate(ordered_nodes):
-                info    = next((d for d in dest_info if d["node"] == node), None)
-                seg     = segments[rank]
-                seg_len = sum(G_run[u][v][0].get('length', 0) for u, v in zip(seg[:-1], seg[1:]))
-                rows.append({
-                    "順序":   f"第 {rank+1} 站",
-                    "地址":   info["addr"] if info else "未知",
-                    "段距離": f"{seg_len/1000:.2f} km",
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                # 統計指標
+                total_orders = sum(len(t["orders"]) for t in assignments)
+                total_len    = sum(
+                    G_run[u][v][0].get('length', 0)
+                    for t in assignments
+                    for seg in t["segments"]
+                    for u, v in zip(seg[:-1], seg[1:])
+                )
+                ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
+                tour_count = sum(1 for m in all_markers if m.get("layer") == "tourist")
 
-            # ── 地圖 ───────────────────────────────────────────────────────────
-            m = folium.Map(
-                location=[s_lat, s_lon], zoom_start=15,
-                tiles='http://mt0.google.com/vt/lyrs=m&hl=zh-TW&x={x}&y={y}&z={z}',
-                attr='Google Maps'
-            )
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
+                c2.metric("🚚 出動車輛",   f"{len(assignments)} 台")
+                c3.metric("📦 總訂單數",   f"{total_orders} 筆")
+                c4.metric("🎪 道路管制",   f"{ev_count} 筆")
+                c5.metric("🚨 即時事故",   f"{len(acc_alerts)} 筆")
 
-            all_coords = []
-            for idx, (seg, color) in enumerate(zip(segments, itertools.cycle(ROUTE_COLORS))):
-                coords  = [[G_run.nodes[n]['y'], G_run.nodes[n]['x']] for n in seg]
-                seg_len = sum(G_run[u][v][0].get('length', 0) for u, v in zip(seg[:-1], seg[1:]))
-                all_coords.extend(coords)
-                folium.PolyLine(
-                    coords, color=color, weight=6, opacity=0.85,
-                    tooltip=f"第 {idx+1} 段（{seg_len/1000:.2f} km）"
-                ).add_to(m)
+                if activate_tourist:
+                    st.info(f"📸 {tour_summary}")
 
-            # 起點
-            folium.Marker(
-                [G_run.nodes[orig]['y'], G_run.nodes[orig]['x']],
-                popup=f"🚚 出發點：{start_loc}",
-                icon=folium.Icon(color='green', icon='truck', prefix='fa')
-            ).add_to(m)
+                # 每台車的配送順序表
+                st.subheader("📋 各車配送順序")
+                for truck in assignments:
+                    slot_label = TIME_SLOT_LABEL.get(truck["time_slot"], truck["time_slot"])
+                    st.markdown(f"**🚚 第 {truck['truck_id']} 台車　{slot_label}**")
+                    rows = []
+                    for rank, node in enumerate(truck["ordered_nodes"]):
+                        order = truck["node_to_order"].get(node, {})
+                        seg   = truck["segments"][rank]
+                        seg_len = sum(G_run[u][v][0].get('length', 0) for u, v in zip(seg[:-1], seg[1:]))
+                        rows.append({
+                            "順序":   f"第 {rank+1} 站",
+                            "地址":   order.get("address", "未知"),
+                            "內容":   order.get("content", ""),
+                            "備註":   order.get("note", ""),
+                            "段距離": f"{seg_len/1000:.2f} km",
+                        })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-            # 各目的地
-            for rank, node in enumerate(ordered_nodes):
-                info  = next((d for d in dest_info if d["node"] == node), None)
-                color = STOP_COLORS[rank % len(STOP_COLORS)]
-                n_lat = G_run.nodes[node]['y']
-                n_lon = G_run.nodes[node]['x']
+                # 地圖
+                m = folium.Map(
+                    location=[s_lat, s_lon], zoom_start=15,
+                    tiles='http://mt0.google.com/vt/lyrs=m&hl=zh-TW&x={x}&y={y}&z={z}',
+                    attr='Google Maps'
+                )
+
+                all_coords = []
+                for truck in assignments:
+                    color = truck["color"]
+                    for seg in truck["segments"]:
+                        coords = [[G_run.nodes[n]['y'], G_run.nodes[n]['x']] for n in seg]
+                        all_coords.extend(coords)
+                        folium.PolyLine(
+                            coords, color=color, weight=6, opacity=0.85,
+                            tooltip=f"🚚 第 {truck['truck_id']} 台車（{truck['time_slot']}）"
+                        ).add_to(m)
+
+                    # 起點
+                    folium.Marker(
+                        [G_run.nodes[orig]['y'], G_run.nodes[orig]['x']],
+                        popup=f"🚚 第 {truck['truck_id']} 台出發點",
+                        icon=folium.Icon(color='green', icon='truck', prefix='fa')
+                    ).add_to(m)
+
+                    # 各配送點
+                    for rank, node in enumerate(truck["ordered_nodes"]):
+                        order  = truck["node_to_order"].get(node, {})
+                        n_lat  = G_run.nodes[node]['y']
+                        n_lon  = G_run.nodes[node]['x']
+                        o_lat  = order.get("lat", n_lat)
+                        o_lon  = order.get("lon", n_lon)
+
+                        folium.Marker(
+                            [n_lat, n_lon],
+                            popup=f"🚚 車{truck['truck_id']} 第{rank+1}站停靠點",
+                            icon=folium.Icon(color='gray', icon='truck', prefix='fa')
+                        ).add_to(m)
+                        folium.Marker(
+                            [o_lat, o_lon],
+                            popup=(
+                                f"📦 車{truck['truck_id']} 第{rank+1}站<br>"
+                                f"{order.get('address','')}<br>"
+                                f"{order.get('content','')}　{order.get('note','')}"
+                            ),
+                            icon=folium.Icon(color='blue', icon='home', prefix='fa')
+                        ).add_to(m)
+                        folium.PolyLine(
+                            [[n_lat, n_lon], [o_lat, o_lon]],
+                            color="gray", weight=2, dash_array='5,5',
+                            tooltip="推車步行路線"
+                        ).add_to(m)
+                        folium.Marker(
+                            [o_lat, o_lon],
+                            icon=folium.DivIcon(html=(
+                                f'<div style="background:{color};color:white;border-radius:50%;'
+                                f'width:22px;height:22px;text-align:center;line-height:22px;'
+                                f'font-weight:bold;font-size:11px;">'
+                                f'{rank+1}</div>'
+                            ))
+                        ).add_to(m)
+
+            # ─────────────────────────────────────────────────────────────────
+            # 手動模式
+            # ─────────────────────────────────────────────────────────────────
+            else:
+                valid_dests = [d.strip() for d in st.session_state.destinations if d.strip()]
+                if not valid_dests:
+                    st.error("請至少輸入一個目的地！")
+                    st.stop()
+
+                dest_info = []
+                for addr in valid_dests:
+                    try:
+                        lat, lon = get_location(addr)
+                        node     = ox.distance.nearest_nodes(G_run, X=lon, Y=lat)
+                        dest_info.append({"addr": addr, "lat": lat, "lon": lon, "node": node})
+                    except Exception as e:
+                        st.warning(f"⚠️ 無法解析「{addr}」：{e}")
+
+                if not dest_info:
+                    st.error("所有目的地均無法解析，請檢查地址。")
+                    st.stop()
+
+                ordered_nodes, segments = greedy_route(G_run, orig, [d["node"] for d in dest_info])
+
+                total_len  = sum(G_run[u][v][0].get('length', 0) for s in segments for u, v in zip(s[:-1], s[1:]))
+                ev_count   = sum(1 for m in all_markers if m.get("layer") == "event")
+                tour_count = sum(1 for m in all_markers if m.get("layer") == "tourist")
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("🛣️ 總路徑長度", f"{total_len/1000:.2f} km")
+                c2.metric("📦 配送站數",   f"{len(ordered_nodes)}")
+                c3.metric("🚨 即時事故",   f"{len(acc_alerts)} 筆")
+                c4.metric("🎪 道路管制",   f"{ev_count} 筆")
+                c5.metric("📸 觀光熱區",   f"{tour_count} 個")
+
+                if activate_tourist:
+                    st.info(f"📸 {tour_summary}")
+
+                st.subheader("📋 建議配送順序")
+                rows = []
+                for rank, node in enumerate(ordered_nodes):
+                    info    = next((d for d in dest_info if d["node"] == node), None)
+                    seg     = segments[rank]
+                    seg_len = sum(G_run[u][v][0].get('length', 0) for u, v in zip(seg[:-1], seg[1:]))
+                    rows.append({
+                        "順序":   f"第 {rank+1} 站",
+                        "地址":   info["addr"] if info else "未知",
+                        "段距離": f"{seg_len/1000:.2f} km",
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                m = folium.Map(
+                    location=[s_lat, s_lon], zoom_start=15,
+                    tiles='http://mt0.google.com/vt/lyrs=m&hl=zh-TW&x={x}&y={y}&z={z}',
+                    attr='Google Maps'
+                )
+
+                all_coords = []
+                for idx, (seg, color) in enumerate(zip(segments, itertools.cycle(ROUTE_COLORS))):
+                    coords  = [[G_run.nodes[n]['y'], G_run.nodes[n]['x']] for n in seg]
+                    seg_len = sum(G_run[u][v][0].get('length', 0) for u, v in zip(seg[:-1], seg[1:]))
+                    all_coords.extend(coords)
+                    folium.PolyLine(
+                        coords, color=color, weight=6, opacity=0.85,
+                        tooltip=f"第 {idx+1} 段（{seg_len/1000:.2f} km）"
+                    ).add_to(m)
 
                 folium.Marker(
-                    [n_lat, n_lon],
-                    popup=f"🚚 第 {rank+1} 站停靠點",
-                    icon=folium.Icon(color=color, icon='truck', prefix='fa')
+                    [G_run.nodes[orig]['y'], G_run.nodes[orig]['x']],
+                    popup=f"🚚 出發點：{start_loc}",
+                    icon=folium.Icon(color='green', icon='truck', prefix='fa')
                 ).add_to(m)
-                if info:
-                    folium.Marker(
-                        [info["lat"], info["lon"]],
-                        popup=f"📦 第 {rank+1} 站：{info['addr']}",
-                        icon=folium.Icon(color='blue', icon='home', prefix='fa')
-                    ).add_to(m)
-                    folium.PolyLine(
-                        [[n_lat, n_lon], [info["lat"], info["lon"]]],
-                        color="gray", weight=2, dash_array='5,5',
-                        tooltip="推車步行路線"
-                    ).add_to(m)
-                    folium.Marker(
-                        [info["lat"], info["lon"]],
-                        icon=folium.DivIcon(html=(
-                            f'<div style="background:#1a1a2e;color:white;border-radius:50%;'
-                            f'width:22px;height:22px;text-align:center;line-height:22px;'
-                            f'font-weight:bold;font-size:12px;border:2px solid {color}">'
-                            f'{rank+1}</div>'
-                        ))
-                    ).add_to(m)
 
-            # 額外標記
+                for rank, node in enumerate(ordered_nodes):
+                    info  = next((d for d in dest_info if d["node"] == node), None)
+                    color = STOP_COLORS[rank % len(STOP_COLORS)]
+                    n_lat = G_run.nodes[node]['y']
+                    n_lon = G_run.nodes[node]['x']
+
+                    folium.Marker(
+                        [n_lat, n_lon],
+                        popup=f"🚚 第 {rank+1} 站停靠點",
+                        icon=folium.Icon(color=color, icon='truck', prefix='fa')
+                    ).add_to(m)
+                    if info:
+                        folium.Marker(
+                            [info["lat"], info["lon"]],
+                            popup=f"📦 第 {rank+1} 站：{info['addr']}",
+                            icon=folium.Icon(color='blue', icon='home', prefix='fa')
+                        ).add_to(m)
+                        folium.PolyLine(
+                            [[n_lat, n_lon], [info["lat"], info["lon"]]],
+                            color="gray", weight=2, dash_array='5,5',
+                            tooltip="推車步行路線"
+                        ).add_to(m)
+                        folium.Marker(
+                            [info["lat"], info["lon"]],
+                            icon=folium.DivIcon(html=(
+                                f'<div style="background:#1a1a2e;color:white;border-radius:50%;'
+                                f'width:22px;height:22px;text-align:center;line-height:22px;'
+                                f'font-weight:bold;font-size:12px;border:2px solid {color}">'
+                                f'{rank+1}</div>'
+                            ))
+                        ).add_to(m)
+
+            # ── 共用：避險標記 ────────────────────────────────────────────────
             for mk in all_markers:
                 layer = mk.get("layer")
-
                 if layer == "event":
                     folium.CircleMarker(
                         location=[mk["lat"], mk["lon"]],
@@ -442,20 +577,14 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                     ).add_to(m)
 
                 elif layer == "tourist":
-                    # 學校和市場走這裡，觀光景點也走這裡
                     if mk["type"] == "school":
-                        icon_name, color = 'graduation-cap', 'blue'
+                        icon_name, mk_color = 'graduation-cap', 'blue'
                     elif mk["type"] == "market":
-                        icon_name, color = 'shopping-cart', 'green'
+                        icon_name, mk_color = 'shopping-cart', 'green'
                     else:
-                        penalty_label = (
-                            "高峰" if mk["penalty"] >= 15 else
-                            "中峰" if mk["penalty"] >= 8  else "低峰"
-                        )
-                        icon_name = 'camera'
-                        color     = 'purple'
+                        icon_name, mk_color = 'camera', 'purple'
 
-                    label = mk.get("label") or (
+                    label     = mk.get("label") or (
                         "高峰" if mk.get("penalty", 0) >= 15 else
                         "中峰" if mk.get("penalty", 0) >= 8  else "低峰"
                     )
@@ -469,7 +598,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
                             f"資料來源：{src_label}"
                         ),
                         tooltip=f"{'🏫' if mk['type']=='school' else '🛒' if mk['type']=='market' else '📸'} {mk['name']}（{label}）",
-                        icon=folium.Icon(color=color, icon=icon_name, prefix='fa')
+                        icon=folium.Icon(color=mk_color, icon=icon_name, prefix='fa')
                     ).add_to(m)
 
             if all_coords:
