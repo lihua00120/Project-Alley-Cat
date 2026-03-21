@@ -15,8 +15,9 @@ from layer4_accident           import apply_traffic_risk
 from layer5_human_caused_event import apply_tourist_risk
 from weights                   import STATIC, LAYER3
 from logistics                 import (load_orders, split_orders_by_slot,
-                                       assign_trucks, geocode_orders,
-                                       plan_routes, TIME_SLOT_LABEL)
+                                        assign_trucks, geocode_orders,
+                                        plan_routes, TIME_SLOT_LABEL,
+                                        nearest_main_road_node)
 
 load_dotenv()
 TDX_CLIENT_ID     = os.getenv("TDX_CLIENT_ID")
@@ -151,7 +152,7 @@ def apply_event_risk(G, sel_date: date):
             continue
         try:
             lat, lon = get_location(addr)
-            node     = ox.distance.nearest_nodes(G, X=lon, Y=lat)
+            node = nearest_main_road_node(G_run, lat, lon)
             for u, v, k, d in G.edges(keys=True, data=True):
                 if u == node or v == node:
                     d['dynamic_cost'] = d.get('dynamic_cost', 1.0) * penalty
@@ -324,7 +325,7 @@ if st.sidebar.button("🚀 開始導航", type="primary", use_container_width=Tr
 
             # 地理編碼起點
             s_lat, s_lon = get_location(start_loc)
-            orig = ox.distance.nearest_nodes(G_run, X=s_lon, Y=s_lat)
+            orig = nearest_main_road_node(G_run, s_lat, s_lon)
 
             # ── 即時事件提示 ──────────────────────────────────────────────────
             if acc_alerts:

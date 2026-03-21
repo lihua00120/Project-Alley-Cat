@@ -136,11 +136,41 @@ def plan_routes(assignments: list, G, start_lat: float, start_lon: float) -> lis
         ordered_nodes, segments = _greedy_route(G, orig, dest_nodes)
 
         # 把排序後的節點對應回訂單資訊
-        node_to_order = {
-            ox.distance.nearest_nodes(G, X=o["lon"], Y=o["lat"]): o
-            for o in truck["orders"]
-        }
-
+        def nearest_main_road_node(G, lat, lon):
+            """
+            優先找主要道路（primary / secondary / tertiary）上的最近節點
+            找不到才 fallback 回一般 nearest_nodes
+            """
+            main_types = {'primary', 'secondary', 'tertiary', 'trunk'}
+            
+            # 收集所有主要道路的節點
+            main_nodes = set()
+            for u, v, data in G.edges(data=True):
+                hw = data.get('highway', '')
+                if isinstance(hw, list):
+                    hw = hw[0]
+                if hw in main_types:
+                    main_nodes.add(u)
+                    main_nodes.add(v)
+            
+            if not main_nodes:
+                return ox.distance.nearest_nodes(G, X=lon, Y=lat)
+            
+            # 在主要道路節點中找最近的
+            min_dist = float('inf')
+            best_node = None
+            for node in main_nodes:
+                n_lat = G.nodes[node]['y']
+                n_lon = G.nodes[node]['x']
+                dist  = (n_lat - lat) ** 2 + (n_lon - lon) ** 2
+                if dist < min_dist:
+                    min_dist  = dist
+                    best_node = node
+            
+            return best_node
+        
+        node = nearest_main_road_node(G, order["lat"], order["lon"])
+        
         result.append({
             **truck,
             "ordered_nodes": ordered_nodes,
